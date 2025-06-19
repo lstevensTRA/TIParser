@@ -40,4 +40,4 @@ streamlit run app.py
 
 ## Security Note
 
-This application requires TPS authentication cookies to function. Never share your cookie file or commit it to version control. # TI_parse
+This application requires TPS authentication cookies to function. Never share your cookie file or commit it to version control.
