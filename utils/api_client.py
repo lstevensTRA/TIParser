@@ -252,8 +252,12 @@ def display_financial_tab(client_data: dict):
         
         with col1:
             for source, amount in income['other_sources'].items():
-                if amount > 0:
-                    st.write(f"**{source.title()}:** {formatter.format_currency(amount)}")
+                try:
+                    amount_value = float(amount) if amount is not None else 0
+                    if amount_value > 0:
+                        st.write(f"**{source.title()}:** {formatter.format_currency(amount_value)}")
+                except (ValueError, TypeError):
+                    continue
     
     # Monthly Expenses
     st.subheader("📊 Monthly Expenses")
@@ -262,15 +266,32 @@ def display_financial_tab(client_data: dict):
     col1, col2 = st.columns(2)
     with col1:
         for expense, amount in expenses.items():
-            if amount > 0 and not expense.endswith('_desc'):
-                desc = expenses.get(f"{expense}_desc", "")
-                label = expense.replace('_', ' ').title()
-                if desc:
-                    label += f" ({desc})"
-                st.write(f"**{label}:** {formatter.format_currency(amount)}")
+            # Convert amount to float for comparison, handle None/empty values
+            try:
+                amount_value = float(amount) if amount is not None else 0
+                if amount_value > 0 and not expense.endswith('_desc'):
+                    desc = expenses.get(f"{expense}_desc", "")
+                    label = expense.replace('_', ' ').title()
+                    if desc:
+                        label += f" ({desc})"
+                    st.write(f"**{label}:** {formatter.format_currency(amount_value)}")
+            except (ValueError, TypeError):
+                # Skip if amount cannot be converted to float
+                continue
     
     with col2:
-        total_expenses = sum(v for k, v in expenses.items() if not k.endswith('_desc') and isinstance(v, (int, float)))
+        # Calculate total expenses with proper type checking
+        total_expenses = 0
+        for k, v in expenses.items():
+            if not k.endswith('_desc'):
+                try:
+                    if isinstance(v, (int, float)):
+                        total_expenses += v
+                    elif isinstance(v, str) and v.strip():
+                        total_expenses += float(v)
+                except (ValueError, TypeError):
+                    continue
+        
         st.metric("Total Monthly Expenses", formatter.format_currency(total_expenses))
         st.metric("IRS Allowable Total", formatter.format_currency(financial['expenses']['total_allowable']))
     
@@ -368,14 +389,22 @@ def display_detailed_data_tab(client_data: dict):
         with col1:
             st.write("**Business Income**")
             for category, amount in business['income'].items():
-                if amount > 0:
-                    st.write(f"• {category.replace('_', ' ').title()}: {formatter.format_currency(amount)}")
+                try:
+                    amount_value = float(amount) if amount is not None else 0
+                    if amount_value > 0:
+                        st.write(f"• {category.replace('_', ' ').title()}: {formatter.format_currency(amount_value)}")
+                except (ValueError, TypeError):
+                    continue
         
         with col2:
             st.write("**Business Expenses**")
             for category, amount in business['expenses'].items():
-                if amount > 0:
-                    st.write(f"• {category.replace('_', ' ').title()}: {formatter.format_currency(amount)}")
+                try:
+                    amount_value = float(amount) if amount is not None else 0
+                    if amount_value > 0:
+                        st.write(f"• {category.replace('_', ' ').title()}: {formatter.format_currency(amount_value)}")
+                except (ValueError, TypeError):
+                    continue
     else:
         st.info("No business income or expenses reported")
     
