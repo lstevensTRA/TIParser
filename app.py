@@ -13,6 +13,7 @@ from datetime import datetime
 import PyPDF2
 import pandas as pd
 from parsers.at_codes import interpret_transaction
+from utils.api_client import render_client_profile_tab
 
 # Configure logging
 logging.basicConfig(
@@ -2240,7 +2241,7 @@ def main():
     # Radio button for page selection
     page = st.sidebar.radio(
         "Choose a page:",
-        ["🏠 Home", "📄 WI Parser", "📊 AT Parser", "📋 ROA Parser", "📝 TRT Parser", "📈 Tax Summary", "📊 Comprehensive Analysis", "⚙️ Settings"],
+        ["🏠 Home", "📄 WI Parser", "📊 AT Parser", "📋 ROA Parser", "📝 TRT Parser", "📈 Tax Summary", "📊 Comprehensive Analysis", "📋 Client Profile", "⚙️ Settings"],
         index=0
     )
 
@@ -2259,6 +2260,8 @@ def main():
         render_tax_summary()
     elif page == "📊 Comprehensive Analysis":
         render_comprehensive_analysis()
+    elif page == "📋 Client Profile":
+        render_client_profile_tab()
     elif page == "⚙️ Settings":
         render_settings()
 
