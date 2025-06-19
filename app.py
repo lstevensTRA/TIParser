@@ -71,7 +71,6 @@ def get_wi_files(case_id: str) -> list:
         st.info("4. Refresh this page.")
         return []
 
-    # Use the cookie string directly as a header
     cookie_header = cookies if isinstance(cookies, str) else ""
 
     url = f"https://tps.logiqs.com/API/Document/gridBind?caseid={case_id}&type=grid"
@@ -83,7 +82,6 @@ def get_wi_files(case_id: str) -> list:
     }
 
     try:
-        st.write("🔍 Fetching documents...")
         response = httpx.post(
             url,
             headers=headers,
@@ -233,26 +231,32 @@ def extract_header_info(text):
     return ssn, tax_periods, tax_year
 
 def extract_form_data(text, form_patterns, tax_year, filing_status='Single', combined_income=0, output_buffer=None):
+    """Extract form data from text using patterns"""
     results = {}
-    logger.info("Starting form pattern matching")
+    
     def write_out(msg):
-        if output_buffer is not None:
+        """Write to both logger and output buffer if provided"""
+        logger.info(msg)
+        if output_buffer:
             output_buffer.write(msg + "\n")
-        else:
-            st.write(msg)
-    write_out("🔍 **Form Pattern Matching:**")
+    
+    write_out("Starting form pattern matching")
+    
+    # Process each form type
     for form_name, pattern_info in form_patterns.items():
-        logger.info(f"Processing form: {form_name}")
-        matches = list(re.finditer(pattern_info['pattern'], text, re.IGNORECASE))
+        write_out(f"Processing form: {form_name}")
+        matches = list(re.finditer(pattern_info['pattern'], text, re.MULTILINE))
+        
         if not matches:
-            write_out(f"\n📋 **Form {form_name}:**")
-            write_out(f"- ❌ No match found for pattern")
-            logger.info(f"Form {form_name}: No pattern match found")
+            write_out(f"Form {form_name}: No pattern match found")
             continue
+            
         for idx, match in enumerate(matches):
             start = match.start()
             end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
             form_text = text[start:end]
+            
+            # Extract unique identifiers
             unique_id = None
             unique_label = None
             if form_name == 'W-2':
@@ -268,6 +272,8 @@ def extract_form_data(text, form_patterns, tax_year, filing_status='Single', com
             elif form_name.startswith('1099'):
                 payer_match = re.search(r'Payer:\s*([A-Z0-9 &.,\-]+)', form_text)
                 unique_label = payer_match.group(1).strip() if payer_match else None
+            
+            # Format label string
             if form_name == 'W-2':
                 label_str = f" (EIN: {unique_id}, Employer: {unique_label})"
             elif form_name == '1099-INT':
@@ -276,43 +282,42 @@ def extract_form_data(text, form_patterns, tax_year, filing_status='Single', com
                 label_str = f", Payer: {unique_label}"
             else:
                 label_str = ""
-            write_out(f"\n📋 **Form {form_name} #{idx+1}{label_str}:**")
-            logger.info(f"Form {form_name} #{idx+1}: {label_str}")
-            write_out(f"- ✅ Pattern matched successfully")
-            logger.info(f"Form {form_name} #{idx+1}: Pattern matched successfully")
-            year = tax_year
-            write_out(f"- 📅 Year: {year}")
-            logger.info(f"Form {form_name} #{idx+1}: Using tax year {year}")
+            
+            write_out(f"Form {form_name} #{idx+1}{label_str}:")
+            write_out("Pattern matched successfully")
+            write_out(f"Using tax year {tax_year}")
+            
+            # Extract fields
             fields_data = {}
-            write_out(f"- 📊 Field Extraction:")
-            logger.info(f"Form {form_name} #{idx+1}: Starting field extraction")
+            write_out("Starting field extraction")
             for field_name, regex in pattern_info['fields'].items():
                 if regex:
                     field_match = re.search(regex, form_text, re.IGNORECASE)
                     if field_match:
                         value = to_float(field_match.group(1))
                         fields_data[field_name] = value
-                        write_out(f"  - {field_name}: {value}")
-                        logger.info(f"Form {form_name} #{idx+1}: Field {field_name} = {value}")
-                        logger.info(f"Matched text for {field_name}: {field_match.group(0)}")
+                        write_out(f"Field {field_name} = {value}")
+                        write_out(f"Matched text for {field_name}: {field_match.group(0)}")
                     else:
-                        write_out(f"  - {field_name}: No match found")
-                        logger.info(f"Form {form_name} #{idx+1}: Field {field_name} - No match found")
+                        write_out(f"Field {field_name} - No match found")
+            
             if not fields_data:
-                write_out(f"⚠️ Form {form_name} matched but no fields were captured")
-                logger.warning(f"Form {form_name} #{idx+1}: Pattern matched but no fields captured")
+                write_out(f"Form {form_name} matched but no fields were captured")
+                continue
+            
+            # Calculate income and withholding using the form's calculation rules
             calc = pattern_info['calculation']
             income = calc['Income'](fields_data, filing_status, combined_income) if 'filing_status' in calc['Income'].__code__.co_varnames else calc['Income'](fields_data)
             withholding = calc['Withholding'](fields_data) if callable(calc.get('Withholding')) else 0
             category = pattern_info.get('category', 'Neither')
-            write_out(f"- 💰 Calculated Values:")
-            write_out(f"  - Income: {income}")
-            write_out(f"  - Withholding: {withholding}")
-            write_out(f"  - Category: {category}")
-            logger.info(f"Form {form_name} #{idx+1}: Calculated values - Income: {income}, Withholding: {withholding}, Category: {category}")
-            if year not in results:
-                results[year] = []
-            results[year].append({
+            
+            write_out(f"Calculated values - Income: {income}, Withholding: {withholding}, Category: {category}")
+            
+            # Store results
+            if tax_year not in results:
+                results[tax_year] = []
+            
+            results[tax_year].append({
                 'Form': form_name,
                 'UniqueID': unique_id if unique_id else None,
                 'Label': unique_label if unique_label else None,
@@ -321,8 +326,123 @@ def extract_form_data(text, form_patterns, tax_year, filing_status='Single', com
                 'Category': category,
                 'Fields': fields_data
             })
-    logger.info("Form processing completed")
+    
+    write_out("Form processing completed")
     return results
+
+def get_transaction_alerts(transactions):
+    """Get alerts for important transaction codes that require attention"""
+    alerts = []
+    
+    # Define alert categories and their associated codes
+    alert_categories = {
+        'Audit Alerts': {
+            'codes': ['420', '424', '430'],
+            'severity': 'error',
+            'icon': '🔍'
+        },
+        'Collection Alerts': {
+            'codes': ['520', '530', '780'],
+            'severity': 'error',
+            'icon': '⚠️'
+        },
+        'Additional Tax Assessments': {
+            'codes': ['290', '300'],
+            'severity': 'error',
+            'icon': '💸'
+        },
+        'Payment Issues': {
+            'codes': ['706', '898'],
+            'severity': 'warning',
+            'icon': '💰'
+        },
+        'Account Holds': {
+            'codes': ['570', '810'],
+            'severity': 'warning',
+            'icon': '🔒'
+        },
+        'Refund Issues': {
+            'codes': ['846', '811'],
+            'severity': 'warning',
+            'icon': '💳'
+        },
+        'Amended Returns': {
+            'codes': ['320'],
+            'severity': 'info',
+            'icon': '📝'
+        },
+        'Resolution Programs': {
+            'codes': ['480', '482'],
+            'severity': 'info',
+            'icon': '✅'
+        },
+        'Bankruptcy': {
+            'codes': ['780'],
+            'severity': 'error',
+            'icon': '🏛️'
+        },
+        'Extensions': {
+            'codes': ['460'],
+            'severity': 'info',
+            'icon': '⏰'
+        },
+        'Substitute Returns': {
+            'codes': ['599'],
+            'severity': 'warning',
+            'icon': '📋'
+        },
+        'Litigation/Freezes': {
+            'codes': ['520', '571'],
+            'severity': 'warning',
+            'icon': '⚖️'
+        }
+    }
+    
+    for trans in transactions:
+        code = trans.get('code')
+        for category, info in alert_categories.items():
+            if code in info['codes']:
+                alert = {
+                    'category': category,
+                    'severity': info['severity'],
+                    'icon': info['icon'],
+                    'code': code,
+                    'meaning': trans.get('meaning', ''),
+                    'date': trans.get('date', ''),
+                    'description': trans.get('description', ''),
+                    'amount': trans.get('amount', 0),
+                    'tax_year': trans.get('tax_year', '')
+                }
+                alerts.append(alert)
+    
+    return alerts
+
+def display_alerts(alerts):
+    """Display alerts in a formatted way"""
+    if not alerts:
+        return
+    
+    st.markdown("### 🚨 Important Alerts")
+    
+    # Group alerts by severity
+    severity_order = {'error': 1, 'warning': 2, 'info': 3}
+    alerts.sort(key=lambda x: (severity_order[x['severity']], x['category']))
+    
+    for alert in alerts:
+        if alert['severity'] == 'error':
+            container = st.error
+        elif alert['severity'] == 'warning':
+            container = st.warning
+        else:
+            container = st.info
+            
+        with container(f"{alert['icon']} {alert['category']} - Tax Year {format_year(alert['tax_year'])}"):
+            st.markdown(f"""
+            **Transaction Code {alert['code']}: {alert['meaning']}**  
+            Date: {alert['date']}  
+            Description: {alert['description']}  
+            Amount: ${alert['amount']:,.2f}
+            """)
 
 def render_home():
     """Render the home page with case number input"""
@@ -349,17 +469,23 @@ def render_home():
     )
     
     if case_id:
+        # Clear previous session data if case ID changes
+        if st.session_state.get('case_id') != case_id:
+            for key in ['wi_data', 'wi_form_matching', 'wi_summary', 'wi_projection', 'wi_log',
+                       'at_data', 'at_form_matching', 'at_summary', 'at_projection', 'at_log']:
+                if key in st.session_state:
+                    del st.session_state[key]
+        
         st.session_state['case_id'] = case_id
         st.success(f"✅ Case ID set to: {case_id}")
         
         # Document type detection
         if cookies:  # Only try to detect documents if we have cookies
-            st.write("🔍 Checking for available documents...")
-            
-            wi_files = get_wi_files(case_id)
-            at_files = get_at_files(case_id)
-            roa_files = get_roa_files(case_id)
-            trt_files = get_trt_files(case_id)
+            with st.spinner("🔍 Fetching all available documents..."):
+                wi_files = get_wi_files(case_id)
+                at_files = get_at_files(case_id)
+                roa_files = get_roa_files(case_id)
+                trt_files = get_trt_files(case_id)
             
             col1, col2 = st.columns(2)
             with col1:
@@ -369,14 +495,147 @@ def render_home():
                 st.write("📋 **Record of Account:**", len(roa_files))
                 st.write("📝 **Tax Return Transcripts:**", len(trt_files))
             
+            # Process WI documents if available
+            if wi_files:
+                process_wi_documents(case_id, wi_files)
+                st.success("✅ Wage & Income documents processed successfully")
+            
+            # Process AT documents if available
+            if at_files:
+                process_at_documents(case_id, at_files)
+                st.success("✅ Account Transcript documents processed successfully")
+            
             if not any([wi_files, at_files, roa_files, trt_files]):
                 st.warning("No documents found for this case ID")
         else:
             st.info("Please ensure you have valid cookies before checking for documents.")
 
+def process_wi_documents(case_id, wi_files):
+    """Process all WI documents once and store results"""
+    all_data = {}
+    form_matching_results = []  # Track form matching results
+    
+    # Set up logging
+    log_buffer = io.StringIO()
+    log_handler = logging.StreamHandler(log_buffer)
+    log_handler.setLevel(logging.INFO)
+    logger.addHandler(log_handler)
+    
+    with st.spinner("Processing Wage & Income documents..."):
+        progress_bar = st.progress(0)
+        total_files = len(wi_files)
+        
+        for idx, wi_file in enumerate(wi_files):
+            logger.info(f"\n{'='*50}")
+            logger.info(f"Processing file: {wi_file['FileName']}")
+            logger.info(f"{'='*50}\n")
+            
+            pdf_bytes = download_file(wi_file["CaseDocumentID"], case_id)
+            if pdf_bytes:
+                text = extract_text_from_pdf(pdf_bytes)
+                if text:
+                    # Log the complete raw text
+                    logger.info("Complete extracted text from PDF:")
+                    logger.info("-" * 50)
+                    logger.info(text)
+                    logger.info("-" * 50)
+                    
+                    # Extract header info (returns ssn, tax_periods, tax_year)
+                    ssn, tax_periods, tax_year = extract_header_info(text)
+                    if ssn and tax_periods:
+                        logger.info(f"Found SSN: {ssn} | Tax Periods: {tax_periods}")
+                    
+                    # Store form matching results
+                    file_results = {
+                        'filename': wi_file['FileName'],
+                        'ssn': ssn,
+                        'tax_period': tax_periods,
+                        'form_matches': []
+                    }
+                    
+                    # Check form patterns
+                    for form_name, pattern_info in form_patterns.items():
+                        found_match = bool(re.search(pattern_info['pattern'], text, re.MULTILINE))
+                        file_results['form_matches'].append({
+                            'form_name': form_name,
+                            'matched': found_match
+                        })
+                    
+                    form_matching_results.append(file_results)
+                    
+                    # Process forms
+                    forms_data = extract_form_data(text, form_patterns, tax_year, output_buffer=log_buffer)
+                    if forms_data:
+                        # forms_data is a dictionary with tax years as keys
+                        for year, year_forms in forms_data.items():
+                            if year not in all_data:
+                                all_data[year] = []
+                            all_data[year].extend(year_forms)
+            
+            # Update progress bar
+            progress_bar.progress((idx + 1) / total_files)
+    
+    # Store results in session state
+    st.session_state['wi_data'] = all_data
+    st.session_state['wi_log'] = log_buffer.getvalue()
+    st.session_state['wi_form_matching'] = form_matching_results
+    
+    # Calculate and store summary data
+    summary_data = []
+    for year in sorted(all_data.keys(), reverse=True):
+        year_forms = all_data[year]
+        
+        # Calculate totals by category
+        se_income = sum(form['Income'] for form in year_forms if form.get('Category') == 'SE' and form.get('Income') is not None)
+        se_withholding = sum(form['Withholding'] for form in year_forms if form.get('Category') == 'SE' and form.get('Withholding') is not None)
+        
+        nonse_income = sum(form['Income'] for form in year_forms if form.get('Category') == 'Non-SE' and form.get('Income') is not None)
+        nonse_withholding = sum(form['Withholding'] for form in year_forms if form.get('Category') == 'Non-SE' and form.get('Withholding') is not None)
+        
+        other_income = sum(form['Income'] for form in year_forms if form.get('Category') == 'Neither' and form.get('Income') is not None)
+        other_withholding = sum(form['Withholding'] for form in year_forms if form.get('Category') == 'Neither' and form.get('Withholding') is not None)
+        
+        summary_data.append({
+            'Tax Year': format_year(year),
+            'Number of Forms': len(year_forms),
+            'SE Income': se_income,
+            'SE Withholding': se_withholding,
+            'Non-SE Income': nonse_income,
+            'Non-SE Withholding': nonse_withholding,
+            'Other Income': other_income,
+            'Other Withholding': other_withholding,
+            'Total Income': se_income + nonse_income + other_income,
+            'Total Withholding': se_withholding + nonse_withholding + other_withholding
+        })
+    st.session_state['wi_summary'] = summary_data
+    
+    # Calculate and store tax projection data
+    projection_data = []
+    for year in sorted(all_data.keys(), reverse=True):
+        year_forms = all_data[year]
+        se_income = sum(form['Income'] for form in year_forms if form.get('Category') == 'SE' and form.get('Income') is not None)
+        se_withholding = sum(form['Withholding'] for form in year_forms if form.get('Category') == 'SE' and form.get('Withholding') is not None)
+        nonse_income = sum(form['Income'] for form in year_forms if form.get('Category') == 'Non-SE' and form.get('Income') is not None)
+        nonse_withholding = sum(form['Withholding'] for form in year_forms if form.get('Category') == 'Non-SE' and form.get('Withholding') is not None)
+        other_income = sum(form['Income'] for form in year_forms if form.get('Category') == 'Neither' and form.get('Income') is not None)
+        
+        projection_data.append({
+            'Tax Year': str(year),
+            'SE Income': se_income,
+            'SE Withholding': se_withholding,
+            'Non-SE Income': nonse_income,
+            'Non-SE Withholding': nonse_withholding,
+            'Other Income': other_income
+        })
+    st.session_state['wi_projection'] = projection_data
+    
+    # Clean up logging
+    logger.removeHandler(log_handler)
+    log_buffer.close()
+
 def render_wi_parser():
-    """Render the WI Transcript Parser page"""
-    st.title("WI Transcript Parser")
+    """Render the WI Parser page (Wage & Income)"""
+    st.title("WI Parser")
     
     # Get case_id from session state
     case_id = st.session_state.get('case_id', None)
@@ -384,97 +643,107 @@ def render_wi_parser():
         st.warning("Please enter a Case ID on the Home tab first.")
         return
 
+    # Check if we have data
+    if 'wi_data' not in st.session_state:
+        st.warning("No Wage & Income data available. Please process a case ID first.")
+        return
+
     # Set up Streamlit tabs
-    main_tab, detail_tab, log_tab, tax_tab = st.tabs(["Summary Table", "Detailed Extraction", "Logs", "Tax Projection"])
+    summary_tab, tax_projection_tab, json_tab, form_matching_tab, log_tab = st.tabs([
+        "Summary", "Tax Projection", "JSON", "Form Matching", "Logs"
+    ])
 
-    # Set up a string buffer for logs
-    import io as _io
-    log_buffer = _io.StringIO()
-    log_handler = logging.StreamHandler(log_buffer)
-    log_handler.setLevel(logging.INFO)
-    logger.addHandler(log_handler)
-
-    # Set up a string buffer for detailed extraction
-    detail_buffer = _io.StringIO()
-
-    wi_files = get_wi_files(case_id)
-    if wi_files:
-        with main_tab:
-            st.write(f"Found {len(wi_files)} WI documents. Parsing all...")
-            all_results = {}
-            for wi_file in wi_files:
-                pdf_bytes = download_file(wi_file["CaseDocumentID"], case_id)
-                if pdf_bytes:
-                    text = extract_text_from_pdf(pdf_bytes)
-                    if text:
-                        ssn, tax_periods, tax_year = extract_header_info(text)
-                        # Write extraction info to detail_buffer in a more concise format
-                        detail_buffer.write(f"Processing: {wi_file['FileName']}\n")
-                        detail_buffer.write(f"SSN: {ssn} | Tax Period: {', '.join(tax_periods) if tax_periods else 'None'}\n")
-                        detail_buffer.write("-" * 50 + "\n")
-                        # Pass buffer to extract_form_data
-                        data = extract_form_data(text, form_patterns, tax_year, output_buffer=detail_buffer)
-                        # Merge results by year
-                        for year, forms in data.items():
-                            if year not in all_results:
-                                all_results[year] = []
-                            all_results[year].extend(forms)
-
-            # Aggregate yearly totals
-            summary_rows = []
-            for year, forms in sorted(all_results.items()):
-                try:
-                    year_int = int(str(year).replace(",", "").replace(" ", ""))
-                except Exception:
-                    year_int = year
-                se_income = 0
-                se_withholding = 0
-                nonse_income = 0
-                nonse_withholding = 0
-                other_income = 0
-                for form in forms:
-                    cat = form.get('Category', 'Other')
-                    income = form.get('Income', 0)
-                    withholding = form.get('Withholding', 0)
-                    if cat == 'SE':
-                        se_income += income
-                        se_withholding += withholding
-                    elif cat == 'Non-SE':
-                        nonse_income += income
-                        nonse_withholding += withholding
-                    else:
-                        other_income += income
-                summary_rows.append({
-                    'Tax Year': year_int,
-                    'SE Income': se_income,
-                    'SE Withholding': se_withholding,
-                    'Non-SE Income': nonse_income,
-                    'Non-SE Withholding': nonse_withholding,
-                    'Other Income': other_income
-                })
-            df = pd.DataFrame(summary_rows)
-            df["Tax Year"] = df["Tax Year"].astype(str)
-            currency_cols = ['SE Income', 'SE Withholding', 'Non-SE Income', 'Non-SE Withholding', 'Other Income']
+    with summary_tab:
+        st.subheader("Income Summary")
+        if st.session_state['wi_summary']:
+            df = pd.DataFrame(st.session_state['wi_summary'])
+            # Format currency columns for display only
+            display_df = df.copy()
+            currency_cols = ['SE Income', 'SE Withholding', 'Non-SE Income', 'Non-SE Withholding', 
+                           'Other Income', 'Other Withholding', 'Total Income', 'Total Withholding']
             for col in currency_cols:
-                df[col] = df[col].apply(lambda x: f"${x:,.2f}")
-            st.subheader("Yearly Income & Withholding Summary")
-            st.dataframe(df, use_container_width=True, hide_index=True)
-
-        with detail_tab:
-            st.subheader("Detailed Extraction Output")
-            st.text(detail_buffer.getvalue())
-
-        with log_tab:
-            st.subheader("Log Output")
-            st.text(log_buffer.getvalue())
-
-        with tax_tab:
-            render_tax_projection(summary_rows)
-    else:
-        with main_tab:
-            st.warning("No WI documents found for this case ID")
+                display_df[col] = display_df[col].apply(lambda x: f"${x:,.2f}")
+            
+            # Display summary table
+            st.table(display_df)
+            
+            # Display detailed breakdown for each year
+            for _, row in df.iterrows():
+                year = row['Tax Year']
+                with st.expander(f"📅 Tax Year {year} - Detailed Breakdown", expanded=True):
+                    col1, col2, col3 = st.columns(3)
+                    
+                    with col1:
+                        st.markdown("**Self-Employment Income**")
+                        st.metric("Income", f"${row['SE Income']:,.2f}")
+                        st.metric("Withholding", f"${row['SE Withholding']:,.2f}")
+                    
+                    with col2:
+                        st.markdown("**Non-Self-Employment Income**")
+                        st.metric("Income", f"${row['Non-SE Income']:,.2f}")
+                        st.metric("Withholding", f"${row['Non-SE Withholding']:,.2f}")
+                    
+                    with col3:
+                        st.markdown("**Other Income**")
+                        st.metric("Income", f"${row['Other Income']:,.2f}")
+                        st.metric("Withholding", f"${row['Other Withholding']:,.2f}")
+                    
+                    # Display forms for this year
+                    st.markdown("**Forms Breakdown**")
+                    year_forms = st.session_state['wi_data'].get(int(year), [])
+                    if year_forms:
+                        for form in year_forms:
+                            form_type = form['Form']
+                            category = form['Category']
+                            income = form.get('Income', 0)
+                            withholding = form.get('Withholding', 0)
+                            label = form.get('Label', '')
+                            
+                            # Format the form display
+                            form_label = f"{form_type}"
+                            if label:
+                                form_label += f" - {label}"
+                            
+                            st.markdown(f"**{form_label}** ({category})")
+                            fcol1, fcol2 = st.columns(2)
+                            with fcol1:
+                                st.write(f"Income: ${income:,.2f}")
+                            with fcol2:
+                                st.write(f"Withholding: ${withholding:,.2f}")
+                            st.markdown("---")
+        else:
+            st.info("📝 No Wage & Income data extracted")
+    
+    with tax_projection_tab:
+        render_tax_projection(st.session_state['wi_projection'])
         
-    logger.removeHandler(log_handler)
+    with json_tab:
+        st.subheader("Parsed WI Data (JSON)")
+        st.json(st.session_state['wi_data'])
+        
+    with form_matching_tab:
+        st.subheader("Form Pattern Matching")
+        st.write(f"Found {len(st.session_state['wi_form_matching'])} WI documents.")
+        
+        # Display form matching results
+        for result in st.session_state['wi_form_matching']:
+            st.markdown(f"**Processing: {result['filename']}**")
+            if result['ssn'] and result['tax_period']:
+                st.text(f"SSN: {result['ssn']} | Tax Period: {result['tax_period']}")
+                st.text("-" * 50)
+            
+            st.text("🔍 Form Pattern Matching:")
+            for match in result['form_matches']:
+                st.text(f"📋 {match['form_name']}:")
+                if match['matched']:
+                    st.text("✅ Match found")
+                else:
+                    st.text("❌ No match found")
+            st.markdown("---")
+        
+    with log_tab:
+        st.subheader("Log Output")
+        st.text(st.session_state.get('wi_log', ''))
 
 def render_tax_projection(summary_rows):
     """Render the tax projection page"""
@@ -831,7 +1100,6 @@ def get_at_files(case_id: str) -> list:
     }
 
     try:
-        st.write("🔍 Fetching documents...")
         response = httpx.post(
             url,
             headers=headers,
@@ -883,6 +1151,12 @@ def get_at_files(case_id: str) -> list:
         st.error(f"Error fetching case files: {str(e)}")
         return []
 
+def format_year(year):
+    """Format year consistently by removing commas and converting to string"""
+    if isinstance(year, str):
+        return year.replace(',', '')
+    return str(year)
+
 def extract_at_transactions(text):
     """Extract transaction data from AT transcript text"""
     # Find the transactions section
@@ -921,15 +1195,32 @@ def extract_at_transactions(text):
     return transactions
 
 def extract_at_data(text):
-    """Extract key data from AT transcript text"""
+    """Extract data from Account Transcript text"""
     data = {}
+    transactions = []
     
-    # Extract tax period
-    tax_period_match = re.search(r'TAX PERIOD:\s*([A-Za-z]+\.\s*\d{1,2},\s*\d{4})', text)
-    if tax_period_match:
-        # Convert "Dec. 31, 2016" to "2016"
-        tax_year = tax_period_match.group(1).split(',')[-1].strip()
-        data['tax_year'] = tax_year
+    # Extract tax year - improved pattern matching
+    year_match = re.search(r'TAX PERIOD:\s*Dec\.\s*31,\s*(\d{4})', text, re.IGNORECASE)
+    if year_match:
+        year = year_match.group(1)
+        data['tax_year'] = format_year(year)
+        logger.info(f"Found tax year from TAX PERIOD: {data['tax_year']}")
+    else:
+        # Try alternative patterns if the main one doesn't work
+        year_match = re.search(r'Tax Period:\s*Dec\.\s*(\d{4})|Tax Period:\s*(\d{4})|TAX PERIOD:\s*(\d{4})', text, re.IGNORECASE)
+        if year_match:
+            year = year_match.group(1) or year_match.group(2) or year_match.group(3)
+            data['tax_year'] = format_year(year)
+            logger.info(f"Found tax year from alternative pattern: {data['tax_year']}")
+        else:
+            # Try to extract year from filename or other patterns
+            year_match = re.search(r'(\d{4})', text)
+            if year_match:
+                data['tax_year'] = format_year(year_match.group(1))
+                logger.info(f"Found tax year from fallback pattern: {data['tax_year']}")
+            else:
+                logger.warning("No tax year found")
+                data['tax_year'] = 'Unknown'
     
     # Extract SSN (Taxpayer ID)
     ssn_match = re.search(r'TAXPAYER IDENTIFICATION NUMBER:\s*([\dX-]+)', text)
@@ -989,6 +1280,58 @@ def extract_at_data(text):
     
     return data
 
+def process_at_documents(case_id, at_files):
+    """Process all AT documents once and store results"""
+    all_data = []
+    
+    # Set up logging
+    log_buffer = io.StringIO()
+    log_handler = logging.StreamHandler(log_buffer)
+    log_handler.setLevel(logging.INFO)
+    logger.addHandler(log_handler)
+    
+    with st.spinner("Processing Account Transcript documents..."):
+        progress_bar = st.progress(0)
+        total_files = len(at_files)
+        
+        for idx, at_file in enumerate(at_files):
+            logger.info(f"\n{'='*50}")
+            logger.info(f"Processing file: {at_file['FileName']}")
+            logger.info(f"{'='*50}\n")
+            
+            pdf_bytes = download_file(at_file["CaseDocumentID"], case_id)
+            if pdf_bytes:
+                text = extract_text_from_pdf(pdf_bytes)
+                if text:
+                    # Log the complete raw text
+                    logger.info("Complete extracted text from PDF:")
+                    logger.info("-" * 50)
+                    logger.info(text)
+                    logger.info("-" * 50)
+                    
+                    data = extract_at_data(text)
+                    if data:
+                        all_data.append(data)
+            
+            # Update progress bar
+            progress_bar.progress((idx + 1) / total_files)
+    
+    # Store results in session state
+    st.session_state['at_data'] = all_data
+    st.session_state['at_log'] = log_buffer.getvalue()
+    
+    # Process alerts
+    all_alerts = []
+    for year_data in all_data:
+        if 'transactions' in year_data:
+            alerts = get_transaction_alerts(year_data['transactions'])
+            all_alerts.extend(alerts)
+    st.session_state['at_alerts'] = all_alerts
+    
+    # Clean up logging
+    logger.removeHandler(log_handler)
+    log_buffer.close()
+
 def render_at_parser():
     """Render the AT Parser page (Account Transcript)"""
     st.title("AT Parser")
@@ -999,132 +1342,103 @@ def render_at_parser():
         st.warning("Please enter a Case ID on the Home tab first.")
         return
 
+    # Check if we have data
+    if 'at_data' not in st.session_state:
+        st.warning("No Account Transcript data available. Please process a case ID first.")
+        return
+
     # Set up Streamlit tabs
-    summary_tab, transactions_tab, log_tab = st.tabs(["Summary", "Transactions", "Logs"])
+    alerts_tab, summary_tab, transactions_tab, json_tab, log_tab = st.tabs([
+        "Alerts", "Summary", "Transactions", "JSON", "Logs"
+    ])
 
-    # Set up a string buffer for logs
-    import io as _io
-    log_buffer = _io.StringIO()
-    log_handler = logging.StreamHandler(log_buffer)
-    log_handler.setLevel(logging.INFO)
-    logger.addHandler(log_handler)
+    with alerts_tab:
+        st.subheader("Account Alerts")
+        alerts = st.session_state.get('at_alerts', [])
+        if alerts:
+            display_alerts(alerts)
+        else:
+            st.success("✅ No significant alerts found in the account transcripts.")
 
-    at_files = get_at_files(case_id)
-    if at_files:
-        # Store all extracted data
-        all_years_data = []
-        all_transactions = []
+    with summary_tab:
+        st.subheader("Account Transcript Summary")
+        at_data = st.session_state['at_data']
         
-        for at_file in at_files:
-            logger.info(f"Processing file: {at_file['FileName']}")
-            pdf_bytes = download_file(at_file["CaseDocumentID"], case_id)
-            if pdf_bytes:
-                text = extract_text_from_pdf(pdf_bytes)
-                if text:
-                    data = extract_at_data(text)
-                    if data and 'tax_year' in data:
-                        all_years_data.append(data)
-                        if 'transactions' in data:
-                            # Add tax year to each transaction for reference
-                            for trans in data['transactions']:
-                                trans['tax_year'] = data['tax_year']
-                            all_transactions.extend(data['transactions'])
+        # Create summary rows for all years
+        summary_rows = []
+        for data in at_data:
+            # Use tax_year if available, otherwise use a default
+            tax_year = data.get('tax_year', 'Unknown')
+            if tax_year == 'Unknown':
+                # Try to extract year from processing date or other fields
+                processing_date = data.get('processing_date', '')
+                if processing_date:
+                    year_match = re.search(r'(\d{4})', processing_date)
+                    if year_match:
+                        tax_year = format_year(year_match.group(1))
+            
+            row = {
+                'Tax Year': format_year(tax_year),
+                'Return Filed': 'Yes' if any(
+                    trans.get('code') in ['150', '976'] 
+                    for trans in data.get('transactions', [])
+                ) else 'No',
+                'Filing Status': data.get('filing_status', 'Unknown'),
+                'Current Balance': data.get('account_balance', 0),
+                'Processing Date': data.get('processing_date', 'Unknown'),
+                'AGI': data.get('adjusted_gross_income', 0),
+                'Taxable Income': data.get('taxable_income', 0),
+                'Tax Per Return': data.get('tax_per_return', 0)
+            }
+            summary_rows.append(row)
         
-        with summary_tab:
-            if all_years_data:
-                # Create DataFrame for summary
-                df = pd.DataFrame(all_years_data)
-                # Sort by tax year
-                df['tax_year'] = pd.to_numeric(df['tax_year'])
-                df = df.sort_values('tax_year')
-                
-                # Format currency columns
-                currency_cols = [
-                    'account_balance', 'accrued_interest', 'accrued_penalty', 
-                    'total_balance', 'adjusted_gross_income', 'taxable_income',
-                    'tax_per_return', 'se_tax_taxpayer', 'se_tax_spouse', 'total_se_tax'
-                ]
-                
-                # Create display DataFrame with formatted currency
-                display_df = df.copy()
-                for col in currency_cols:
-                    display_df[col] = display_df[col].apply(lambda x: f"${x:,.2f}")
-                
-                # Rename columns for display
-                column_names = {
-                    'tax_year': 'Tax Year',
-                    'account_balance': 'Account Balance',
-                    'accrued_interest': 'Accrued Interest',
-                    'accrued_penalty': 'Accrued Penalty',
-                    'total_balance': 'Total Balance',
-                    'adjusted_gross_income': 'AGI',
-                    'taxable_income': 'Taxable Income',
-                    'tax_per_return': 'Tax Per Return',
-                    'se_tax_taxpayer': 'SE Tax (Taxpayer)',
-                    'se_tax_spouse': 'SE Tax (Spouse)',
-                    'total_se_tax': 'Total SE Tax',
-                    'filing_status': 'Filing Status'
-                }
-                display_df = display_df.rename(columns=column_names)
-                
-                # Display the summary table
-                st.subheader("Account Transcript Summary")
-                st.dataframe(display_df, use_container_width=True, hide_index=True)
+        if summary_rows:
+            df = pd.DataFrame(summary_rows)
+            # Format currency columns
+            currency_cols = ['Current Balance', 'AGI', 'Taxable Income', 'Tax Per Return']
+            for col in currency_cols:
+                df[col] = df[col].apply(lambda x: f"${x:,.2f}" if isinstance(x, (int, float)) else x)
+            st.table(df)
+        else:
+            st.info("No Account Transcript data available")
+
+    with transactions_tab:
+        st.subheader("Transaction History")
+        at_data = st.session_state['at_data']
         
-        with transactions_tab:
-            if all_transactions:
-                st.subheader("Transactions")
-                # Create DataFrame for transactions
-                trans_df = pd.DataFrame(all_transactions)
-                # Sort by date
-                trans_df['date'] = pd.to_datetime(trans_df['date'])
-                trans_df = trans_df.sort_values(['tax_year', 'date'])
-                
-                # Format amount as currency
-                trans_df['amount'] = trans_df['amount'].apply(lambda x: f"${x:,.2f}")
-                
-                # Rename columns for display
-                trans_df = trans_df.rename(columns={
-                    'tax_year': 'Tax Year',
-                    'code': 'Code',
-                    'meaning': 'Meaning',
-                    'description': 'Description',
-                    'date': 'Date',
-                    'amount': 'Amount'
-                })
-                
-                # Reorder columns
-                trans_df = trans_df[['Tax Year', 'Date', 'Code', 'Meaning', 'Description', 'Amount']]
-                
-                # Display the transactions table
-                st.dataframe(trans_df, use_container_width=True, hide_index=True)
-            else:
-                st.info("No transactions found in the documents.")
-        
-        with log_tab:
-            st.subheader("Log Output")
-            for at_file in at_files:
-                logger.info(f"Processing file: {at_file['FileName']}")
-                pdf_bytes = download_file(at_file["CaseDocumentID"], case_id)
-                if pdf_bytes:
-                    text = extract_text_from_pdf(pdf_bytes)
-                    if text:
-                        logger.info("Successfully extracted text from PDF")
-                        logger.info("Raw text content:")
-                        logger.info("-" * 50)
-                        logger.info(text)
-                        logger.info("-" * 50)
+        # Group transactions by year
+        for year_data in sorted(at_data, key=lambda x: x.get('tax_year', ''), reverse=True):
+            tax_year = year_data.get('tax_year', 'Unknown')
+            transactions = year_data.get('transactions', [])
+            
+            # If tax_year is unknown, try to extract from processing date
+            if tax_year == 'Unknown':
+                processing_date = year_data.get('processing_date', '')
+                if processing_date:
+                    year_match = re.search(r'(\d{4})', processing_date)
+                    if year_match:
+                        tax_year = format_year(year_match.group(1))
+            
+            if transactions:
+                with st.expander(f"Tax Year {format_year(tax_year)}", expanded=True):
+                    trans_df = pd.DataFrame(transactions)
+                    if not trans_df.empty:
+                        # Format amount column
+                        if 'amount' in trans_df.columns:
+                            trans_df['amount'] = trans_df['amount'].apply(lambda x: f"${x:,.2f}" if pd.notnull(x) else '')
+                        st.dataframe(trans_df, use_container_width=True)
                     else:
-                        logger.warning(f"Failed to extract text from {at_file['FileName']}")
-                else:
-                    logger.error(f"Failed to download {at_file['FileName']}")
-            st.text(log_buffer.getvalue())
-    else:
-        with summary_tab:
-            st.warning("No AT documents found for this case ID")
+                        st.info("No transactions found for this year")
+            else:
+                st.info(f"No transactions found for Tax Year {format_year(tax_year)}")
 
-    # Clean up logging handler
-    logger.removeHandler(log_handler)
+    with json_tab:
+        st.subheader("Raw AT Data (JSON)")
+        st.json(st.session_state['at_data'])
+
+    with log_tab:
+        st.subheader("Log Output")
+        st.text(st.session_state.get('at_log', ''))
 
 def get_roa_files(case_id: str) -> list:
     """
@@ -1146,7 +1460,6 @@ def get_roa_files(case_id: str) -> list:
     }
 
     try:
-        st.write("🔍 Fetching documents...")
         response = httpx.post(
             url,
             headers=headers,
@@ -1213,7 +1526,6 @@ def get_trt_files(case_id: str) -> list:
     }
 
     try:
-        st.write("🔍 Fetching documents...")
         response = httpx.post(
             url,
             headers=headers,
@@ -1362,6 +1674,83 @@ def render_trt_parser():
     # Clean up logging handler
     logger.removeHandler(log_handler)
 
+def render_tax_summary():
+    """Render the Tax Summary page combining data from all parsers"""
+    st.title("Tax Summary")
+    
+    # Get case_id from session state
+    case_id = st.session_state.get('case_id', None)
+    if not case_id:
+        st.warning("Please enter a Case ID on the Home tab first.")
+        return
+        
+    # Set up Streamlit tabs
+    summary_tab, details_tab, json_tab, log_tab = st.tabs(["Summary", "Details", "JSON", "Logs"])
+    
+    # Get data from session state
+    wi_data = st.session_state.get('wi_data', {})
+    at_data = st.session_state.get('at_data', [])
+    
+    # Convert all years to strings for consistent comparison
+    all_years = sorted(set(
+        [str(year) for year in wi_data.keys()] + 
+        [data['tax_year'] for data in at_data]
+    ))
+    
+    # Convert AT data to a year-keyed dictionary for easier lookup
+    at_years_dict = {data['tax_year']: data for data in at_data}
+    
+    with summary_tab:
+        st.subheader("Tax Years Summary")
+        
+        # Create a DataFrame for the summary
+        summary_data = []
+        for year in sorted(all_years, reverse=True):
+            formatted_year = format_year(year)
+            at_data = at_years_dict.get(formatted_year)
+            summary_data.append({
+                "Tax Year": formatted_year,
+                "Return Filed": "Yes" if at_data else "No AT Data"
+            })
+        
+        if summary_data:
+            df = pd.DataFrame(summary_data)
+            st.table(df)
+        else:
+            st.info("🔄 No Account Transcript data available yet")
+    
+    with details_tab:
+        st.info("Detailed analysis view is under development. This tab will show more specific breakdowns of income types, filing thresholds, and compliance indicators.")
+    
+    with json_tab:
+        st.subheader("Combined Tax Data")
+        
+        # Create a combined summary by year
+        combined_summary = {}
+        
+        for year in all_years:
+            at_data = at_years_dict.get(str(year))
+            wi_year_data = wi_data.get(int(year), [])
+            
+            combined_summary[year] = {
+                'wi_data': {
+                    'forms': wi_year_data,
+                    'total_income': sum(form['Income'] for form in wi_year_data if form.get('Income') is not None),
+                    'total_withholding': sum(form['Withholding'] for form in wi_year_data if form.get('Withholding') is not None)
+                },
+                'at_data': at_data if at_data else None,
+                'return_status': 'Filed' if at_data and any(
+                    trans.get('code') in ['150', '976'] 
+                    for trans in at_data.get('transactions', [])
+                ) else 'Not Filed',
+                'has_at_data': bool(at_data)
+            }
+        
+        st.json(combined_summary)
+    
+    with log_tab:
+        st.info("Log view is under development. This tab will show processing logs and data validation results.")
+
 def render_settings():
     """Render the settings page"""
     st.title("Settings")
@@ -1391,15 +1780,27 @@ def render_settings():
         - Shows account balances and status
         - Lists all transactions with explanations
         - Tracks penalties and interest
+        
+    - **Tax Summary**: Combines data from all sources
+        - Shows combined yearly summaries
+        - Tracks return filing status
+        - Compares reported income with filed returns
     """)
 
 def main():
-    """Main application entry point"""
     st.set_page_config(
         page_title="IRS Transcript Parser",
         page_icon="📊",
         layout="wide"
     )
+
+    # Initialize session state
+    if 'case_id' not in st.session_state:
+        st.session_state['case_id'] = ''
+    if 'wi_data' not in st.session_state:
+        st.session_state['wi_data'] = {}
+    if 'at_data' not in st.session_state:
+        st.session_state['at_data'] = []
 
     # Sidebar navigation
     st.sidebar.title("Navigation")
@@ -1407,7 +1808,7 @@ def main():
     # Radio button for page selection
     page = st.sidebar.radio(
         "Choose a page:",
-        ["🏠 Home", "📄 WI Parser", "📊 AT Parser", "📋 ROA Parser", "📝 TRT Parser", "⚙️ Settings"],
+        ["🏠 Home", "📄 WI Parser", "📊 AT Parser", "📋 ROA Parser", "📝 TRT Parser", "📈 Tax Summary", "⚙️ Settings"],
         index=0
     )
 
@@ -1422,6 +1823,8 @@ def main():
         render_roa_parser()
     elif page == "📝 TRT Parser":
         render_trt_parser()
+    elif page == "📈 Tax Summary":
+        render_tax_summary()
     elif page == "⚙️ Settings":
         render_settings()
 
