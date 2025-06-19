@@ -1787,6 +1787,438 @@ def render_settings():
         - Compares reported income with filed returns
     """)
 
+def create_tax_summary(wi_data: dict, at_data: list) -> dict:
+    """
+    Combines WI and AT data to create comprehensive tax analysis
+    
+    Args:
+        wi_data: Dictionary with years as keys, arrays of forms as values
+        at_data: List of account transcript dictionaries
+        
+    Returns:
+        Dictionary with year-by-year analysis including discrepancies and recommendations
+    """
+    
+    def calculate_wi_totals(year_forms):
+        """Calculate total income and withholding from WI forms"""
+        total_income = 0
+        total_withholding = 0
+        
+        for form in year_forms:
+            # Only count SE and Non-SE income (exclude "Neither" category)
+            if form.get('Category') in ['SE', 'Non-SE']:
+                total_income += form.get('Income', 0)
+                total_withholding += form.get('Withholding', 0)
+        
+        return total_income, total_withholding
+    
+    def find_at_data_for_year(year, at_data):
+        """Find AT data for a specific year"""
+        for at_record in at_data:
+            at_year = at_record.get('tax_year', '')
+            if at_year and str(at_year).isdigit() and int(at_year) == int(year):
+                return at_record
+        return None
+    
+    def determine_filing_status(at_record):
+        """Determine if return was filed based on AT transactions"""
+        if not at_record or 'transactions' not in at_record:
+            return "Not Filed"
+        
+        # Look for transaction code 150 (Return filed) or 976 (Return filed)
+        for transaction in at_record['transactions']:
+            if transaction.get('code') in ['150', '976']:
+                return "Filed"
+        
+        return "Not Filed"
+    
+    def calculate_simple_tax(income, filing_status="Single"):
+        """Simple tax calculation for unfiled year projections"""
+        # 2024 tax brackets (simplified)
+        brackets = {
+            "Single": [
+                (0, 11600, 0.10),
+                (11600, 47150, 0.12),
+                (47150, 100525, 0.22),
+                (100525, 191950, 0.24),
+                (191950, 243725, 0.32),
+                (243725, 609350, 0.35),
+                (609350, float('inf'), 0.37)
+            ],
+            "Married Filing Joint": [
+                (0, 23200, 0.10),
+                (23200, 94300, 0.12),
+                (94300, 201050, 0.22),
+                (201050, 383900, 0.24),
+                (383900, 487450, 0.32),
+                (487450, 731200, 0.35),
+                (731200, float('inf'), 0.37)
+            ]
+        }
+        
+        # Use Single brackets as default
+        tax_brackets = brackets.get(filing_status, brackets["Single"])
+        
+        # Standard deduction
+        std_deduction = {"Single": 14600, "Married Filing Joint": 29200}.get(filing_status, 14600)
+        
+        # Calculate taxable income
+        taxable_income = max(0, income - std_deduction)
+        
+        # Calculate tax
+        tax = 0
+        for lower, upper, rate in tax_brackets:
+            if taxable_income > lower:
+                tax += (min(taxable_income, upper) - lower) * rate
+            else:
+                break
+        
+        return tax
+    
+    def generate_recommendations(analysis_data):
+        """Generate actionable recommendations based on analysis"""
+        recommendations = []
+        
+        income_discrepancy = analysis_data.get('income_discrepancy', 0)
+        return_status = analysis_data.get('return_status', 'Unknown')
+        needs_amendment = analysis_data.get('needs_amendment', False)
+        unfiled_liability = analysis_data.get('unfiled_liability', 0)
+        
+        if return_status == "Not Filed":
+            if unfiled_liability > 10000:
+                recommendations.append(f"URGENT: Unfiled return with estimated liability of ${unfiled_liability:,.2f}")
+                recommendations.append("Consider filing immediately to stop penalty accumulation")
+            elif unfiled_liability > 5000:
+                recommendations.append(f"High priority: Unfiled return with estimated liability of ${unfiled_liability:,.2f}")
+                recommendations.append("File return to minimize penalties and interest")
+            elif unfiled_liability > 0:
+                recommendations.append(f"File return to address ${unfiled_liability:,.2f} estimated liability")
+            else:
+                recommendations.append("Return appears to have no tax liability - consider filing for refund")
+        
+        elif return_status == "Filed":
+            if needs_amendment and income_discrepancy > 0:
+                if income_discrepancy > 10000:
+                    recommendations.append(f"URGENT: Consider amended return for unreported income of ${income_discrepancy:,.2f}")
+                elif income_discrepancy > 5000:
+                    recommendations.append(f"Review potential unreported income of ${income_discrepancy:,.2f}")
+                    recommendations.append("Consider amended return if income was legitimately excluded")
+                else:
+                    recommendations.append(f"Minor discrepancy of ${income_discrepancy:,.2f} - review for accuracy")
+            
+            elif income_discrepancy < 0:
+                # AT AGI is higher than WI income (may be legitimate)
+                recommendations.append(f"AT shows ${abs(income_discrepancy):,.2f} more income than WI forms")
+                recommendations.append("Verify if additional income sources were properly reported")
+        
+        # Add general recommendations
+        if not recommendations:
+            recommendations.append("No significant issues detected - review for completeness")
+        
+        return recommendations
+    
+    def calculate_priority_level(analysis_data):
+        """Calculate priority level (1=urgent, 2=high, 3=medium)"""
+        return_status = analysis_data.get('return_status', 'Unknown')
+        income_discrepancy = abs(analysis_data.get('income_discrepancy', 0))
+        unfiled_liability = analysis_data.get('unfiled_liability', 0)
+        
+        if return_status == "Not Filed":
+            if unfiled_liability > 10000:
+                return 1  # Urgent
+            elif unfiled_liability > 5000:
+                return 2  # High
+            else:
+                return 3  # Medium
+        elif return_status == "Filed":
+            if income_discrepancy > 10000:
+                return 1  # Urgent
+            elif income_discrepancy > 5000:
+                return 2  # High
+            elif income_discrepancy > 1000:
+                return 3  # Medium
+            else:
+                return 3  # Medium (no significant issues)
+        
+        return 3  # Default to medium
+    
+    # Initialize result structure
+    result = {}
+    
+    # Get all unique years from both WI and AT data
+    wi_years = set(int(year) for year in wi_data.keys())
+    at_years = set()
+    for at_record in at_data:
+        tax_year = at_record.get('tax_year', '')
+        if tax_year and str(tax_year).isdigit():
+            at_years.add(int(tax_year))
+    
+    all_years = sorted(wi_years.union(at_years), reverse=True)
+    
+    for year in all_years:
+        year_str = str(year)
+        
+        # Get WI data for this year
+        year_forms = wi_data.get(year, [])
+        wi_total_income, wi_total_withholding = calculate_wi_totals(year_forms)
+        
+        # Get AT data for this year
+        at_record = find_at_data_for_year(year_str, at_data)
+        return_status = determine_filing_status(at_record)
+        
+        # Calculate income discrepancy
+        at_agi = at_record.get('adjusted_gross_income', 0) if at_record else 0
+        income_discrepancy = wi_total_income - at_agi
+        
+        # Determine if amendment is needed
+        needs_amendment = False
+        if return_status == "Filed" and abs(income_discrepancy) > 1000:
+            needs_amendment = True
+        
+        # Calculate unfiled liability
+        unfiled_liability = 0
+        if return_status == "Not Filed" and wi_total_income > 0:
+            filing_status = at_record.get('filing_status', 'Single') if at_record else 'Single'
+            estimated_tax = calculate_simple_tax(wi_total_income, filing_status)
+            unfiled_liability = max(0, estimated_tax - wi_total_withholding)
+        
+        # Create analysis data
+        analysis_data = {
+            'income_discrepancy': income_discrepancy,
+            'needs_amendment': needs_amendment,
+            'unfiled_liability': unfiled_liability,
+            'return_status': return_status
+        }
+        
+        # Generate recommendations and priority
+        analysis_data['recommendations'] = generate_recommendations(analysis_data)
+        analysis_data['priority_level'] = calculate_priority_level(analysis_data)
+        
+        # Build result structure
+        result[year_str] = {
+            'wi_data': {
+                'forms': year_forms,
+                'total_income': wi_total_income,
+                'total_withholding': wi_total_withholding
+            },
+            'at_data': at_record,
+            'return_status': return_status,
+            'has_at_data': at_record is not None,
+            'analysis': analysis_data
+        }
+    
+    return result
+
+def render_comprehensive_analysis():
+    """Render the Comprehensive Analysis page"""
+    st.title("Comprehensive Tax Analysis")
+    
+    # Get case_id from session state
+    case_id = st.session_state.get('case_id', None)
+    if not case_id:
+        st.warning("Please enter a Case ID on the Home tab first.")
+        return
+
+    # Check if we have data
+    wi_data = st.session_state.get('wi_data', {})
+    at_data = st.session_state.get('at_data', [])
+    
+    if not wi_data and not at_data:
+        st.warning("No data available. Please process documents first.")
+        return
+    
+    # Create comprehensive analysis
+    analysis = create_tax_summary(wi_data, at_data)
+    
+    # Set up Streamlit tabs
+    overview_tab, detailed_tab, recommendations_tab, json_tab = st.tabs([
+        "Overview", "Detailed Analysis", "Recommendations", "JSON"
+    ])
+    
+    with overview_tab:
+        st.subheader("Tax Analysis Overview")
+        
+        # Create summary table
+        summary_data = []
+        for year, year_data in analysis.items():
+            analysis_info = year_data['analysis']
+            summary_data.append({
+                'Tax Year': year,
+                'Return Status': analysis_info['return_status'],
+                'WI Total Income': year_data['wi_data']['total_income'],
+                'AT AGI': year_data['at_data'].get('adjusted_gross_income', 0) if year_data['at_data'] else 0,
+                'Income Discrepancy': analysis_info['income_discrepancy'],
+                'Needs Amendment': 'Yes' if analysis_info['needs_amendment'] else 'No',
+                'Unfiled Liability': analysis_info['unfiled_liability'],
+                'Priority Level': analysis_info['priority_level']
+            })
+        
+        if summary_data:
+            df = pd.DataFrame(summary_data)
+            
+            # Format currency columns
+            currency_cols = ['WI Total Income', 'AT AGI', 'Income Discrepancy', 'Unfiled Liability']
+            for col in currency_cols:
+                df[col] = df[col].apply(lambda x: f"${x:,.2f}")
+            
+            # Add priority color coding
+            def color_priority(val):
+                if val == 1:
+                    return 'background-color: #ffcccc'  # Red for urgent
+                elif val == 2:
+                    return 'background-color: #ffebcc'  # Orange for high
+                else:
+                    return 'background-color: #e6ffe6'  # Green for medium
+            
+            styled_df = df.style.applymap(color_priority, subset=['Priority Level'])
+            st.dataframe(styled_df, use_container_width=True)
+            
+            # Summary statistics
+            st.markdown("---")
+            col1, col2, col3, col4 = st.columns(4)
+            
+            total_discrepancy = sum(abs(row['Income Discrepancy']) for row in summary_data)
+            total_unfiled_liability = sum(row['Unfiled Liability'] for row in summary_data)
+            urgent_count = sum(1 for row in summary_data if row['Priority Level'] == 1)
+            filed_count = sum(1 for row in summary_data if row['Return Status'] == 'Filed')
+            
+            with col1:
+                st.metric("Total Income Discrepancy", f"${total_discrepancy:,.2f}")
+            with col2:
+                st.metric("Total Unfiled Liability", f"${total_unfiled_liability:,.2f}")
+            with col3:
+                st.metric("Urgent Issues", urgent_count)
+            with col4:
+                st.metric("Returns Filed", f"{filed_count}/{len(summary_data)}")
+    
+    with detailed_tab:
+        st.subheader("Detailed Year-by-Year Analysis")
+        
+        for year, year_data in analysis.items():
+            analysis_info = year_data['analysis']
+            
+            # Create expandable section for each year
+            with st.expander(f"📅 Tax Year {year} - Priority Level {analysis_info['priority_level']}", expanded=True):
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.markdown("**Wage & Income Data**")
+                    st.write(f"Total Income: ${year_data['wi_data']['total_income']:,.2f}")
+                    st.write(f"Total Withholding: ${year_data['wi_data']['total_withholding']:,.2f}")
+                    st.write(f"Number of Forms: {len(year_data['wi_data']['forms'])}")
+                    
+                    # Show forms breakdown
+                    if year_data['wi_data']['forms']:
+                        st.markdown("**Forms:**")
+                        for form in year_data['wi_data']['forms']:
+                            st.write(f"• {form['Form']} ({form['Category']}): ${form['Income']:,.2f}")
+                
+                with col2:
+                    st.markdown("**Account Transcript Data**")
+                    if year_data['at_data']:
+                        at_data = year_data['at_data']
+                        st.write(f"AGI: ${at_data.get('adjusted_gross_income', 0):,.2f}")
+                        st.write(f"Taxable Income: ${at_data.get('taxable_income', 0):,.2f}")
+                        st.write(f"Tax Per Return: ${at_data.get('tax_per_return', 0):,.2f}")
+                        st.write(f"Filing Status: {at_data.get('filing_status', 'Unknown')}")
+                        st.write(f"Account Balance: ${at_data.get('account_balance', 0):,.2f}")
+                    else:
+                        st.write("No AT data available")
+                
+                # Analysis section
+                st.markdown("---")
+                st.markdown("**Analysis Results**")
+                
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    discrepancy = analysis_info['income_discrepancy']
+                    if discrepancy > 0:
+                        st.error(f"Income Discrepancy: +${discrepancy:,.2f}")
+                        st.write("WI income > AT AGI")
+                    elif discrepancy < 0:
+                        st.warning(f"Income Discrepancy: ${discrepancy:,.2f}")
+                        st.write("AT AGI > WI income")
+                    else:
+                        st.success("No income discrepancy")
+                
+                with col2:
+                    if analysis_info['return_status'] == "Not Filed":
+                        liability = analysis_info['unfiled_liability']
+                        if liability > 0:
+                            st.error(f"Unfiled Liability: ${liability:,.2f}")
+                        else:
+                            st.success("No estimated liability")
+                    else:
+                        st.success("Return Filed")
+                
+                with col3:
+                    priority = analysis_info['priority_level']
+                    if priority == 1:
+                        st.error(f"Priority: URGENT ({priority})")
+                    elif priority == 2:
+                        st.warning(f"Priority: HIGH ({priority})")
+                    else:
+                        st.success(f"Priority: MEDIUM ({priority})")
+    
+    with recommendations_tab:
+        st.subheader("Actionable Recommendations")
+        
+        # Group by priority level
+        urgent_issues = []
+        high_priority = []
+        medium_priority = []
+        
+        for year, year_data in analysis.items():
+            analysis_info = year_data['analysis']
+            priority = analysis_info['priority_level']
+            
+            issue = {
+                'year': year,
+                'return_status': analysis_info['return_status'],
+                'recommendations': analysis_info['recommendations'],
+                'income_discrepancy': analysis_info['income_discrepancy'],
+                'unfiled_liability': analysis_info['unfiled_liability']
+            }
+            
+            if priority == 1:
+                urgent_issues.append(issue)
+            elif priority == 2:
+                high_priority.append(issue)
+            else:
+                medium_priority.append(issue)
+        
+        # Display urgent issues
+        if urgent_issues:
+            st.error("🚨 URGENT ISSUES")
+            for issue in urgent_issues:
+                with st.expander(f"Tax Year {issue['year']} - URGENT", expanded=True):
+                    for rec in issue['recommendations']:
+                        st.write(f"• {rec}")
+        
+        # Display high priority issues
+        if high_priority:
+            st.warning("⚠️ HIGH PRIORITY ISSUES")
+            for issue in high_priority:
+                with st.expander(f"Tax Year {issue['year']} - HIGH PRIORITY"):
+                    for rec in issue['recommendations']:
+                        st.write(f"• {rec}")
+        
+        # Display medium priority issues
+        if medium_priority:
+            st.info("ℹ️ MEDIUM PRIORITY ISSUES")
+            for issue in medium_priority:
+                with st.expander(f"Tax Year {issue['year']} - MEDIUM PRIORITY"):
+                    for rec in issue['recommendations']:
+                        st.write(f"• {rec}")
+        
+        if not any([urgent_issues, high_priority, medium_priority]):
+            st.success("✅ No significant issues detected")
+    
+    with json_tab:
+        st.subheader("Complete Analysis Data (JSON)")
+        st.json(analysis)
+
 def main():
     st.set_page_config(
         page_title="IRS Transcript Parser",
@@ -1808,7 +2240,7 @@ def main():
     # Radio button for page selection
     page = st.sidebar.radio(
         "Choose a page:",
-        ["🏠 Home", "📄 WI Parser", "📊 AT Parser", "📋 ROA Parser", "📝 TRT Parser", "📈 Tax Summary", "⚙️ Settings"],
+        ["🏠 Home", "📄 WI Parser", "📊 AT Parser", "📋 ROA Parser", "📝 TRT Parser", "📈 Tax Summary", "📊 Comprehensive Analysis", "⚙️ Settings"],
         index=0
     )
 
@@ -1825,6 +2257,8 @@ def main():
         render_trt_parser()
     elif page == "📈 Tax Summary":
         render_tax_summary()
+    elif page == "📊 Comprehensive Analysis":
+        render_comprehensive_analysis()
     elif page == "⚙️ Settings":
         render_settings()
 
