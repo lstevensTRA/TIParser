@@ -13,9 +13,10 @@ from datetime import datetime
 import PyPDF2
 import pandas as pd
 from parsers.at_codes import interpret_transaction
-import requests
-import xml.etree.ElementTree as ET
-from client_profile import render_client_profile
+from utils.api_client import render_client_profile_tab
+from utils.tp_s_parser import TPSParser
+from collections import defaultdict
+from io import BytesIO
 
 # Configure logging
 logging.basicConfig(
@@ -534,7 +535,7 @@ def process_wi_documents(case_id, wi_files):
             logger.info(f"{'='*50}\n")
             
             # Extract owner from filename
-            owner = extract_owner_from_filename(wi_file['FileName'])
+            owner = TPSParser.extract_owner_from_filename(wi_file['FileName'])
             logger.info(f"Extracted owner from filename '{wi_file['FileName']}': {owner}")
             
             pdf_bytes = download_file(wi_file["CaseDocumentID"], case_id)

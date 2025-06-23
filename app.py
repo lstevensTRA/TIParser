@@ -14,6 +14,7 @@ import PyPDF2
 import pandas as pd
 from parsers.at_codes import interpret_transaction
 from utils.api_client import render_client_profile_tab
+from utils.tp_s_parser import TPSParser
 from collections import defaultdict
 from io import BytesIO
 
@@ -592,6 +593,10 @@ def process_wi_documents(case_id, wi_files):
             logger.info(f"Processing file: {wi_file['FileName']}")
             logger.info(f"{'='*50}\n")
             
+            # Extract owner from filename using TPSParser
+            owner = TPSParser.extract_owner_from_filename(wi_file['FileName'])
+            logger.info(f"Extracted owner from filename '{wi_file['FileName']}': {owner}")
+            
             pdf_bytes = download_file(wi_file["CaseDocumentID"], case_id)
             if pdf_bytes:
                 text = extract_text_from_pdf(pdf_bytes)
@@ -611,6 +616,7 @@ def process_wi_documents(case_id, wi_files):
                     # Store form matching results
                     file_results = {
                         'filename': wi_file['FileName'],
+                        'owner': owner,  # Add owner to file results
                         'ssn': ssn,
                         'tax_period': tax_periods,
                         'form_matches': []
@@ -632,6 +638,13 @@ def process_wi_documents(case_id, wi_files):
                         for year, year_forms in forms_data.items():
                             if year not in all_data:
                                 all_data[year] = []
+                            
+                            # Add owner information to each form
+                            for form in year_forms:
+                                form['Owner'] = owner
+                                form['SourceFile'] = wi_file['FileName']  # Add source file for tracking
+                                logger.info(f"Added Owner={owner} to form {form['Form']}")
+                            
                             # Separate SSA-1099 and others
                             non_ssa_forms = [f for f in year_forms if f['Form'] != 'SSA-1099']
                             ssa_forms = [f for f in year_forms if f['Form'] == 'SSA-1099']
@@ -768,6 +781,48 @@ def render_wi_parser():
             # Display summary table
             st.table(display_df)
             
+            # Add owner-based summary
+            st.markdown("---")
+            st.subheader("Owner-Based Summary")
+            
+            # Calculate totals by owner for each year
+            for _, row in df.iterrows():
+                year = row['Tax Year']
+                year_forms = st.session_state['wi_data'].get(int(year), [])
+                
+                if year_forms:
+                    # Use TPSParser to aggregate by owner
+                    year_data = {int(year): year_forms}
+                    totals = TPSParser.aggregate_income_by_owner(year_data)
+                    year_totals = totals.get(int(year), {})
+                    
+                    with st.expander(f"📊 Tax Year {year} - Owner Breakdown", expanded=False):
+                        col1, col2, col3, col4 = st.columns(4)
+                        
+                        with col1:
+                            st.markdown("**Taxpayer**")
+                            tp_data = year_totals.get('taxpayer', {})
+                            st.metric("Income", f"${tp_data.get('income', 0):,.2f}")
+                            st.metric("Withholding", f"${tp_data.get('withholding', 0):,.2f}")
+                        
+                        with col2:
+                            st.markdown("**Spouse**")
+                            spouse_data = year_totals.get('spouse', {})
+                            st.metric("Income", f"${spouse_data.get('income', 0):,.2f}")
+                            st.metric("Withholding", f"${spouse_data.get('withholding', 0):,.2f}")
+                        
+                        with col3:
+                            st.markdown("**Joint**")
+                            joint_data = year_totals.get('joint', {})
+                            st.metric("Income", f"${joint_data.get('income', 0):,.2f}")
+                            st.metric("Withholding", f"${joint_data.get('withholding', 0):,.2f}")
+                        
+                        with col4:
+                            st.markdown("**Combined**")
+                            combined_data = year_totals.get('combined', {})
+                            st.metric("Income", f"${combined_data.get('income', 0):,.2f}")
+                            st.metric("Withholding", f"${combined_data.get('withholding', 0):,.2f}")
+            
             # Display detailed breakdown for each year
             for _, row in df.iterrows():
                 year = row['Tax Year']
@@ -793,25 +848,43 @@ def render_wi_parser():
                     st.markdown("**Forms Breakdown**")
                     year_forms = st.session_state['wi_data'].get(int(year), [])
                     if year_forms:
+                        # Group forms by owner
+                        forms_by_owner = {}
                         for form in year_forms:
-                            form_type = form['Form']
-                            category = form['Category']
-                            income = form.get('Income', 0)
-                            withholding = form.get('Withholding', 0)
-                            label = form.get('Label', '')
+                            owner = form.get('Owner', 'TP')
+                            if owner not in forms_by_owner:
+                                forms_by_owner[owner] = []
+                            forms_by_owner[owner].append(form)
+                        
+                        # Display by owner
+                        for owner, forms in forms_by_owner.items():
+                            owner_label = "Taxpayer" if owner == "TP" else "Spouse" if owner == "S" else "Joint"
+                            st.markdown(f"**{owner_label} Forms:**")
                             
-                            # Format the form display
-                            form_label = f"{form_type}"
-                            if label:
-                                form_label += f" - {label}"
-                            
-                            st.markdown(f"**{form_label}** ({category})")
-                            fcol1, fcol2 = st.columns(2)
-                            with fcol1:
-                                st.write(f"Income: ${income:,.2f}")
-                            with fcol2:
-                                st.write(f"Withholding: ${withholding:,.2f}")
-                            st.markdown("---")
+                            for form in forms:
+                                form_type = form['Form']
+                                category = form['Category']
+                                income = form.get('Income', 0)
+                                withholding = form.get('Withholding', 0)
+                                label = form.get('Label', '')
+                                source_file = form.get('SourceFile', 'Unknown')
+                                
+                                # Format the form display
+                                form_label = f"{form_type}"
+                                if label:
+                                    form_label += f" - {label}"
+                                
+                                st.markdown(f"• {form_label} ({category})")
+                                fcol1, fcol2, fcol3 = st.columns(3)
+                                with fcol1:
+                                    st.write(f"Income: ${income:,.2f}")
+                                with fcol2:
+                                    st.write(f"Withholding: ${withholding:,.2f}")
+                                with fcol3:
+                                    st.write(f"Source: {source_file}")
+                                st.markdown("---")
+                    else:
+                        st.info("No forms found for this year")
         else:
             st.info("📝 No Wage & Income data extracted")
     
@@ -2406,6 +2479,45 @@ def render_comprehensive_analysis():
                         st.write(f"Account Balance: ${at_data.get('account_balance', 0):,.2f}")
                     else:
                         st.write("No AT data available")
+                
+                # TP/S Analysis section
+                st.markdown("---")
+                st.markdown("**TP/S Analysis**")
+                
+                # Use TPSParser for owner analysis
+                year_forms = year_data['wi_data']['forms']
+                filing_status = year_data['at_data'].get('filing_status', 'Single') if year_data['at_data'] else 'Single'
+                
+                # Aggregate by owner
+                year_data_dict = {year: year_forms}
+                totals = TPSParser.aggregate_income_by_owner(year_data_dict)
+                year_totals = totals.get(year, {})
+                
+                # Generate TP/S analysis
+                tps_analysis = TPSParser.generate_tps_analysis_summary(year_data_dict, filing_status)
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.markdown("**Income by Owner:**")
+                    tp_data = year_totals.get('taxpayer', {})
+                    spouse_data = year_totals.get('spouse', {})
+                    joint_data = year_totals.get('joint', {})
+                    combined_data = year_totals.get('combined', {})
+                    
+                    st.write(f"Taxpayer: ${tp_data.get('income', 0):,.2f}")
+                    st.write(f"Spouse: ${spouse_data.get('income', 0):,.2f}")
+                    st.write(f"Joint: ${joint_data.get('income', 0):,.2f}")
+                    st.write(f"Combined: ${combined_data.get('income', 0):,.2f}")
+                
+                with col2:
+                    st.markdown("**Missing Data Analysis:**")
+                    missing_recs = tps_analysis.get('missing_data_recommendations', [])
+                    if missing_recs:
+                        for rec in missing_recs:
+                            st.warning(f"⚠️ {rec}")
+                    else:
+                        st.success("✅ TP/S data appears complete")
                 
                 # Analysis section
                 st.markdown("---")
