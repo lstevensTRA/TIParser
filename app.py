@@ -179,11 +179,29 @@ def to_float(val):
         return 0.0
 
 def extract_text_from_pdf(pdf_bytes):
-    """Extract text from PDF bytes using PyPDF2, then pdfplumber as fallback."""
+    """Extract text from PDF bytes using PyPDF2, then pdfplumber, then OCR as fallback."""
     import PyPDF2
+    import pytesseract
+    from pdf2image import convert_from_bytes
+    import re
     text = ""
     used_method = None
-    
+
+    def is_text_readable(text):
+        if not text or len(text) < 100:
+            return False
+        # Too many (cid:xx) patterns = garbage
+        if len(re.findall(r'\(cid:\d+\)', text)) > 10:
+            return False
+        # Too many non-ASCII or non-printable chars
+        ascii_ratio = sum(32 <= ord(c) < 127 for c in text) / len(text)
+        if ascii_ratio < 0.7:
+            return False
+        # At least 20% letters, at least 10 spaces per 1000 chars
+        letter_ratio = sum(c.isalpha() for c in text) / len(text)
+        space_ratio = text.count(' ') / max(1, len(text))
+        return letter_ratio > 0.2 and space_ratio > 0.01
+
     # Try PyPDF2 first
     try:
         reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
@@ -192,30 +210,47 @@ def extract_text_from_pdf(pdf_bytes):
             page_text = page.extract_text() or ""
             page_texts.append(page_text)
         text = "\n".join(page_texts)
-        if text and len(text.strip()) > 50:
+        if is_text_readable(text):
             used_method = "PyPDF2"
             logger.info("Successfully extracted text using PyPDF2")
             return text
+        else:
+            logger.warning("PyPDF2 extraction unreadable, will try fallback.")
     except Exception as e:
         logger.warning(f"PyPDF2 failed: {e}")
-    
+
     # Try pdfplumber next
     try:
         import pdfplumber
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             page_texts = []
-            for page in enumerate(pdf.pages):
+            for page in pdf.pages:
                 page_text = page.extract_text() or ""
                 page_texts.append(page_text)
             text = "\n".join(page_texts)
-        if text and len(text.strip()) > 50:
+        if is_text_readable(text):
             used_method = "pdfplumber"
             logger.info("Successfully extracted text using pdfplumber")
             return text
+        else:
+            logger.warning("pdfplumber extraction unreadable, will try OCR fallback.")
     except Exception as e:
         logger.warning(f"pdfplumber failed: {e}")
-    
-    logger.warning("Could not extract text from PDF")
+
+    # OCR fallback
+    try:
+        images = convert_from_bytes(pdf_bytes)
+        ocr_text = "\n".join(pytesseract.image_to_string(img) for img in images)
+        if is_text_readable(ocr_text):
+            used_method = "OCR"
+            logger.info("Successfully extracted text using OCR fallback")
+            return ocr_text
+        else:
+            logger.warning("OCR extraction also unreadable.")
+    except Exception as e:
+        logger.warning(f"OCR fallback failed: {e}")
+
+    logger.warning("Could not extract readable text from PDF with any method.")
     return ""
 
 def extract_header_info(text):
@@ -1506,69 +1541,89 @@ def format_year(year):
     return str(year)
 
 def extract_at_transactions(text):
-    """Extract transaction data from AT transcript text"""
-    # Find the transactions section
-    transactions_match = re.search(r'TRANSACTIONS\s*\n.*?\n(.*?)(?=\n\s*\n|$)', text, re.DOTALL)
+    """Extract transaction data from AT transcript text (robust to all formats)"""
+    # Find the transactions section (from TRANSACTIONS to next ALL CAPS section or end)
+    # Handles both 'CODE\nEXPLANATION...' and 'CODEEXPLANATION...' squished formats
+    transactions_match = re.search(r'TRANSACTIONS[\s\S]*?(?:\n([A-Z ]{5,}):|\Z)', text)
     if not transactions_match:
-        return []
-    
-    transactions_text = transactions_match.group(1)
-    
-    # Parse each transaction line
-    # Pattern matches: CODE, EXPLANATION, DATE, AMOUNT
-    transaction_pattern = r'(\d{3})(.*?)(\d{2}-\d{2}-\d{4})\s*\$?([-\d,.]+|-)'
+        # Fallback: try to get everything after TRANSACTIONS
+        transactions_match = re.search(r'TRANSACTIONS[\s\S]*', text)
+        if not transactions_match:
+            return []
+        transactions_text = transactions_match.group(0)
+    else:
+        transactions_text = text[transactions_match.start():transactions_match.end()]
+
+    # Remove the TRANSACTIONS header and any column headers (robust to squished or spaced)
+    transactions_text = re.sub(r'TRANSACTIONS.*?\nCODE\s*EXPLANATION.*?\n', '', transactions_text, flags=re.DOTALL|re.IGNORECASE)
+    transactions_text = re.sub(r'TRANSACTIONS.*?\n', '', transactions_text, flags=re.DOTALL|re.IGNORECASE)
+    transactions_text = re.sub(r'CODE\s*EXPLANATION.*?\n', '', transactions_text, flags=re.DOTALL|re.IGNORECASE)
+    transactions_text = re.sub(r'CODEEXPLANATION.*?\n', '', transactions_text, flags=re.DOTALL|re.IGNORECASE)
+
+    # Parse each transaction line (robust to squished columns)
+    # Try both spaced and squished patterns
+    transaction_patterns = [
+        r'(?m)\b(\d{3})\b\s+(.+?)\s{2,}(\d{2}-\d{2}-\d{4})\s+\$?([-,\d\.]+|-)',  # spaced
+        r'(?m)\b(\d{3})\b([^\d]{5,}?)(\d{2}-\d{2}-\d{4})\$?([-,\d\.]+|-)'  # squished
+    ]
     transactions = []
-    
-    for match in re.finditer(transaction_pattern, transactions_text):
-        code = match.group(1)
-        description = match.group(2).strip()
-        date = match.group(3)
-        amount_str = match.group(4)
-        
-        # Handle amount parsing
-        try:
-            if amount_str == '-':
-                amount = 0.0  # Convert dash to zero
-            else:
-                amount = float(amount_str.replace(',', ''))
-        except ValueError:
-            logger.warning(f"Could not parse amount '{amount_str}' for transaction code {code}")
-            amount = 0.0
-        
-        # Interpret the transaction using our codes database
-        interpreted = interpret_transaction(code, description, date, amount)
-        if interpreted:
-            transactions.append(interpreted)
-    
+    for pattern in transaction_patterns:
+        for match in re.finditer(pattern, transactions_text):
+            code = match.group(1)
+            description = match.group(2).strip()
+            date = match.group(3)
+            amount_str = match.group(4)
+            try:
+                if amount_str == '-' or not amount_str.strip():
+                    amount = 0.0
+                else:
+                    amount = float(amount_str.replace(',', ''))
+            except ValueError:
+                logger.warning(f"Could not parse amount '{amount_str}' for transaction code {code}")
+                amount = 0.0
+            interpreted = interpret_transaction(code, description, date, amount)
+            if interpreted:
+                transactions.append(interpreted)
+        if transactions:
+            break  # Use the first pattern that matches
+    # Also handle 'n/aNo tax return filed' and similar lines
+    for line in transactions_text.splitlines():
+        if re.search(r'no tax return filed', line, re.IGNORECASE):
+            transactions.append({
+                'code': 'n/a',
+                'meaning': 'No tax return filed',
+                'description': line.strip(),
+                'date': '',
+                'amount': 0.0
+            })
     return transactions
 
 def extract_at_data(text):
-    """Extract data from Account Transcript text"""
+    """Extract data from Account Transcript text (robust to all formats)"""
     data = {}
-    transactions = []
-    # Extract tax year - improved pattern matching
-    # 1. Try 'Report for Tax Period Ending: 12-31-2022'
+    # Extract tax year (handle all known formats)
     year_match = re.search(r'Report for Tax Period Ending:\s*\d{2}-\d{2}-(\d{4})', text)
     if year_match:
         year = year_match.group(1)
         data['tax_year'] = format_year(year)
         logger.info(f"Found tax year from Report for Tax Period Ending: {data['tax_year']}")
     else:
-        # 2. Try 'TAX PERIOD: Dec. 31, 2022'
         year_match = re.search(r'TAX PERIOD:\s*Dec\.\s*31,\s*(\d{4})', text, re.IGNORECASE)
         if year_match:
             year = year_match.group(1)
             data['tax_year'] = format_year(year)
             logger.info(f"Found tax year from TAX PERIOD: {data['tax_year']}")
         else:
-            # 3. Try alternative patterns
-            year_match = re.search(r'Tax Period:\s*Dec\.\s*(\d{4})|Tax Period:\s*(\d{4})|TAX PERIOD:\s*(\d{4})', text, re.IGNORECASE)
+            year_match = re.search(r'TAX PERIOD:\s*([A-Za-z]+\.\s*\d{1,2},?\s*\d{4})', text, re.IGNORECASE)
             if year_match:
-                year = year_match.group(1) or year_match.group(2) or year_match.group(3)
-                data['tax_year'] = format_year(year)
-                logger.info(f"Found tax year from alternative pattern: {data['tax_year']}")
+                # Try to extract year from the matched string
+                year = re.search(r'(\d{4})', year_match.group(1))
+                if year:
+                    data['tax_year'] = format_year(year.group(1))
+                    logger.info(f"Found tax year from TAX PERIOD alt: {data['tax_year']}")
+                else:
+                    data['tax_year'] = 'Unknown'
             else:
-                # 4. Try to extract year from filename or other patterns
                 year_match = re.search(r'(\d{4})', text)
                 if year_match:
                     data['tax_year'] = format_year(year_match.group(1))
@@ -1576,31 +1631,23 @@ def extract_at_data(text):
                 else:
                     logger.warning("No tax year found")
                     data['tax_year'] = 'Unknown'
-    
-    # Extract SSN (Taxpayer ID)
-    ssn_match = re.search(r'TAXPAYER IDENTIFICATION NUMBER:\s*([\dX-]+)', text)
-    if ssn_match:
-        data['ssn'] = ssn_match.group(1)
-    
-    # Extract financial data
+    # Extract financial data (robust to upper/lowercase, colon/space, missing values)
     financial_patterns = {
-        'account_balance': r'ACCOUNT BALANCE:[\s]*[\$]?([\d,\.]+)',
-        'accrued_interest': r'ACCRUED INTEREST:[\s]*[\$]?([\d,\.]+)',
-        'accrued_penalty': r'ACCRUED PENALTY:[\s]*[\$]?([\d,\.]+)',
-        'total_balance': r'ACCOUNT BALANCE PLUS ACCRUALS.*?:[\s]*[\$]?([\d,\.]+)',
-        'adjusted_gross_income': r'ADJUSTED GROSS INCOME:[\s]*[\$]?([\d,\.]+)',
-        'taxable_income': r'TAXABLE INCOME:[\s]*[\$]?([\d,\.]+)',
-        'tax_per_return': r'TAX PER RETURN:[\s]*[\$]?([\d,\.]+)',
-        'se_tax_taxpayer': r'SE TAXABLE INCOME TAXPAYER:[\s]*[\$]?([\d,\.]+)',
-        'se_tax_spouse': r'SE TAXABLE INCOME SPOUSE:[\s]*[\$]?([\d,\.]+)',
-        'total_se_tax': r'TOTAL SELF EMPLOYMENT TAX:[\s]*[\$]?([\d,\.]+)'
+        'account_balance': r'(?:ACCOUNT BALANCE|Account balance)[:\s]*[\$]?([\d,\.\-]+)',
+        'accrued_interest': r'(?:ACCRUED INTEREST|Accrued interest)[:\s]*[\$]?([\d,\.\-]+)',
+        'accrued_penalty': r'(?:ACCRUED PENALTY|Accrued penalty)[:\s]*[\$]?([\d,\.\-]+)',
+        'total_balance': r'(?:ACCOUNT BALANCE PLUS ACCRUALS|Account balance plus accruals).*?:[\s]*[\$]?([\d,\.\-]+)',
+        'adjusted_gross_income': r'(?:ADJUSTED GROSS INCOME|Adjusted gross income)[:\s]*[\$]?([\d,\.\-]+)',
+        'taxable_income': r'(?:TAXABLE INCOME|Taxable income)[:\s]*[\$]?([\d,\.\-]+)',
+        'tax_per_return': r'(?:TAX PER RETURN|Tax per return)[:\s]*[\$]?([\d,\.\-]+)',
+        'se_tax_taxpayer': r'(?:SE TAXABLE INCOME TAXPAYER|SE taxable income taxpayer)[:\s]*[\$]?([\d,\.\-]+)',
+        'se_tax_spouse': r'(?:SE TAXABLE INCOME SPOUSE|SE taxable income spouse)[:\s]*[\$]?([\d,\.\-]+)',
+        'total_se_tax': r'(?:TOTAL SELF EMPLOYMENT TAX|Total self employment tax)[:\s]*[\$]?([\d,\.\-]+)'
     }
-    
     for key, pattern in financial_patterns.items():
-        match = re.search(pattern, text, re.IGNORECASE)  # Added case-insensitive matching
+        match = re.search(pattern, text, re.IGNORECASE)
         if match:
             try:
-                # Convert string amount to float, removing commas
                 amount = float(match.group(1).replace(',', ''))
                 data[key] = amount
                 logger.info(f"Found {key}: {amount}")
@@ -1610,29 +1657,24 @@ def extract_at_data(text):
         else:
             logger.warning(f"No match found for {key}")
             data[key] = 0.00
-    
     # Extract filing status
-    filing_match = re.search(r'FILING STATUS:\s*([^,\n]+)', text)
+    filing_match = re.search(r'(?:FILING STATUS|Filing status)[:\s]*([^,\n]+)', text, re.IGNORECASE)
     if filing_match:
         data['filing_status'] = filing_match.group(1).strip()
-    
-    # Extract processing date - more flexible pattern
-    processing_match = re.search(r'PROCESSING DATE\s*([A-Z][a-z]+\.?\s+\d{1,2},?\s*\d{4})', text)
+    # Extract processing date (robust to all formats)
+    processing_match = re.search(r'(?:PROCESSING DATE|Processing date)[:\s]*([A-Za-z]+\.?\s+\d{1,2},?\s*\d{4})', text)
     if processing_match:
         data['processing_date'] = processing_match.group(1)
         logger.info(f"Found processing date: {data['processing_date']}")
     else:
-        # Try alternative date format
-        alt_processing_match = re.search(r'PROCESSING DATE\s*([A-Z][a-z]+\.?\s+\d{1,2}\s+\d{4})', text)
+        alt_processing_match = re.search(r'(?:PROCESSING DATE|Processing date)[:\s]*([A-Za-z]+\.?\s+\d{1,2}\s+\d{4})', text)
         if alt_processing_match:
             data['processing_date'] = alt_processing_match.group(1)
             logger.info(f"Found processing date (alt format): {data['processing_date']}")
         else:
             logger.warning("No processing date found")
-    
     # Extract transactions
     data['transactions'] = extract_at_transactions(text)
-    
     return data
 
 def process_at_documents(case_id, at_files):
@@ -1690,19 +1732,13 @@ def process_at_documents(case_id, at_files):
 def render_at_parser():
     """Render the AT Parser page (Account Transcript)"""
     st.title("AT Parser")
-    
-    # Get case_id from session state
     case_id = st.session_state.get('case_id', None)
     if not case_id:
         st.warning("Please enter a Case ID on the Home tab first.")
         return
-
-    # Check if we have data
     if 'at_data' not in st.session_state:
         st.warning("No Account Transcript data available. Please process a case ID first.")
         return
-
-    # Set up Streamlit tabs
     alerts_tab, summary_tab, transactions_tab, json_tab, log_tab = st.tabs([
         "Alerts", "Summary", "Transactions", "JSON", "Logs"
     ])
@@ -1718,26 +1754,29 @@ def render_at_parser():
     with summary_tab:
         st.subheader("Account Transcript Summary")
         at_data = st.session_state['at_data']
-        
-        # Create summary rows for all years
         summary_rows = []
         for data in at_data:
-            # Use tax_year if available, otherwise use a default
             tax_year = data.get('tax_year', 'Unknown')
             if tax_year == 'Unknown':
-                # Try to extract year from processing date or other fields
                 processing_date = data.get('processing_date', '')
                 if processing_date:
                     year_match = re.search(r'(\d{4})', processing_date)
                     if year_match:
                         tax_year = format_year(year_match.group(1))
-            
+            # Determine if return filed using code 150 logic
+            transactions = data.get('transactions', [])
+            filed = False
+            for trans in transactions:
+                if trans.get('code') == '150':
+                    filed = True
+                    break
+            # Also check for explicit 'No tax return filed' transaction
+            for trans in transactions:
+                if trans.get('meaning', '').lower().startswith('no tax return filed'):
+                    filed = False
             row = {
                 'Tax Year': format_year(tax_year),
-                'Return Filed': 'Yes' if any(
-                    trans.get('code') in ['150', '976'] 
-                    for trans in data.get('transactions', [])
-                ) else 'No',
+                'Return Filed': 'Yes' if filed else 'No',
                 'Filing Status': data.get('filing_status', 'Unknown'),
                 'Current Balance': data.get('account_balance', 0),
                 'Processing Date': data.get('processing_date', 'Unknown'),
@@ -1746,10 +1785,14 @@ def render_at_parser():
                 'Tax Per Return': data.get('tax_per_return', 0)
             }
             summary_rows.append(row)
-        
+        def year_key(row):
+            try:
+                return int(row['Tax Year'])
+            except Exception:
+                return -9999
+        summary_rows = sorted(summary_rows, key=year_key, reverse=True)
         if summary_rows:
             df = pd.DataFrame(summary_rows)
-            # Format currency columns
             currency_cols = ['Current Balance', 'AGI', 'Taxable Income', 'Tax Per Return']
             for col in currency_cols:
                 df[col] = df[col].apply(lambda x: f"${x:,.2f}" if isinstance(x, (int, float)) else x)
