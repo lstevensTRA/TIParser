@@ -93,7 +93,7 @@ class ClientDataFormatter:
                 'best_time_to_call': raw_data.get('BestTimeToCall', 'N/A')
             },
             'tax_info': {
-                'total_liability': float(raw_data.get('TaxLiability', 0)),
+                'total_liability': formatter._safe_float(raw_data.get('TaxLiability', 0)),
                 'years_owed': [year.strip() for year in raw_data.get('OweTaxestoFederal', '').split(',') if year.strip()],
                 'unfiled_years': [year.strip() for year in raw_data.get('UnfiledTaxestoFederal', '').split(',') if year.strip()],
                 'status_id': raw_data.get('StatusID'),
@@ -128,24 +128,36 @@ class ClientDataFormatter:
         except (ValueError, TypeError):
             return default
     
+    def _safe_float(self, value, default=0.0):
+        """Safely convert value to float, handling commas and other formatting"""
+        try:
+            if value is None or value == '':
+                return default
+            # Remove commas and convert to float
+            if isinstance(value, str):
+                value = value.replace(',', '')
+            return float(value)
+        except (ValueError, TypeError):
+            return default
+    
     def _organize_financial_data(self, misc_data: Dict, raw_data: Dict) -> Dict:
         """Organize financial data from MiscXML and other fields"""
         return {
             'income': {
-                'taxpayer_net': float(raw_data.get('ClientDetailNetIncom', 0)),
-                'taxpayer_gross': float(raw_data.get('ClientDetailGrossIncom', 0)),
-                'spouse_net': float(raw_data.get('SpouseDetailNetIncom', 0)),
-                'spouse_gross': float(raw_data.get('SpouseDetailGrossIncom', 0)),
-                'monthly_gross': float(misc_data.get('IncomeGrossM', 0)),
-                'monthly_net': float(misc_data.get('Income_Net', 0)),
+                'taxpayer_net': self._safe_float(raw_data.get('ClientDetailNetIncom', 0)),
+                'taxpayer_gross': self._safe_float(raw_data.get('ClientDetailGrossIncom', 0)),
+                'spouse_net': self._safe_float(raw_data.get('SpouseDetailNetIncom', 0)),
+                'spouse_gross': self._safe_float(raw_data.get('SpouseDetailGrossIncom', 0)),
+                'monthly_gross': self._safe_float(misc_data.get('IncomeGrossM', 0)),
+                'monthly_net': self._safe_float(misc_data.get('Income_Net', 0)),
                 'other_sources': {
-                    'business': float(misc_data.get('Income_Business', 0)),
-                    'pension': float(misc_data.get('Income_Pension', 0)),
-                    'rental': float(misc_data.get('Income_RentalGross', 0)),
-                    'interest': float(misc_data.get('Income_Interest', 0)),
-                    'alimony': float(misc_data.get('Income_Alimony', 0)),
-                    'child_support': float(misc_data.get('Income_ChildSupport', 0)),
-                    'distributions': float(misc_data.get('Income_Distributions', 0))
+                    'business': self._safe_float(misc_data.get('Income_Business', 0)),
+                    'pension': self._safe_float(misc_data.get('Income_Pension', 0)),
+                    'rental': self._safe_float(misc_data.get('Income_RentalGross', 0)),
+                    'interest': self._safe_float(misc_data.get('Income_Interest', 0)),
+                    'alimony': self._safe_float(misc_data.get('Income_Alimony', 0)),
+                    'child_support': self._safe_float(misc_data.get('Income_ChildSupport', 0)),
+                    'distributions': self._safe_float(misc_data.get('Income_Distributions', 0))
                 }
             },
             'expenses': self._organize_expenses(misc_data),
@@ -164,50 +176,50 @@ class ClientDataFormatter:
         """Organize expense data"""
         return {
             'monthly_expenses': {
-                'housekeeping': float(misc_data.get('Expense_HouseKeeping', 0)),
-                'apparel': float(misc_data.get('Expense_Apparel', 0)),
-                'personal_care': float(misc_data.get('Expense_PersonalCare', 0)),
-                'food_misc': float(misc_data.get('Expense_FoodMisc', 0)),
-                'transportation': float(misc_data.get('Expense_PublicTransportation', 0)),
-                'prescription': float(misc_data.get('Expense_Prescription', 0)),
-                'copay': float(misc_data.get('Expense_Copay', 0)),
-                'taxes': float(misc_data.get('Expense_Taxes', 0)),
-                'other_1': float(misc_data.get('Expense_Other1', 0)),
+                'housekeeping': self._safe_float(misc_data.get('Expense_HouseKeeping', 0)),
+                'apparel': self._safe_float(misc_data.get('Expense_Apparel', 0)),
+                'personal_care': self._safe_float(misc_data.get('Expense_PersonalCare', 0)),
+                'food_misc': self._safe_float(misc_data.get('Expense_FoodMisc', 0)),
+                'transportation': self._safe_float(misc_data.get('Expense_PublicTransportation', 0)),
+                'prescription': self._safe_float(misc_data.get('Expense_Prescription', 0)),
+                'copay': self._safe_float(misc_data.get('Expense_Copay', 0)),
+                'taxes': self._safe_float(misc_data.get('Expense_Taxes', 0)),
+                'other_1': self._safe_float(misc_data.get('Expense_Other1', 0)),
                 'other_1_desc': misc_data.get('Expense_Other1S', ''),
-                'other_2': float(misc_data.get('Expense_Other2', 0)),
+                'other_2': self._safe_float(misc_data.get('Expense_Other2', 0)),
                 'other_2_desc': misc_data.get('Expense_Other2S', ''),
-                'other_3': float(misc_data.get('Expense_Other3', 0)),
+                'other_3': self._safe_float(misc_data.get('Expense_Other3', 0)),
                 'other_3_desc': misc_data.get('Expense_Other3S', '')
             },
-            'total_allowable': float(misc_data.get('ExpenseTotalAllowable', 0))
+            'total_allowable': self._safe_float(misc_data.get('ExpenseTotalAllowable', 0))
         }
     
     def _organize_assets(self, misc_data: Dict) -> Dict:
         """Organize asset data"""
         return {
-            'cash_on_hand': float(misc_data.get('CashOnHand', 0)),
-            'total_net_realizable': float(misc_data.get('TotalNetRealizableValue', 0)),
-            'retirement': float(misc_data.get('EE_Asset_Retirement', 0)),
+            'cash_on_hand': self._safe_float(misc_data.get('CashOnHand', 0)),
+            'total_net_realizable': self._safe_float(misc_data.get('TotalNetRealizableValue', 0)),
+            'retirement': self._safe_float(misc_data.get('EE_Asset_Retirement', 0)),
             'real_estate': {
-                'quick_sale': float(misc_data.get('EE_Asset_QSRealEstate', 0))
+                'quick_sale': self._safe_float(misc_data.get('EE_Asset_QSRealEstate', 0))
             },
             'vehicles': {
-                'vehicle_1_qs': float(misc_data.get('EE_Asset_QSVehicle1', 0)),
-                'vehicle_2_qs': float(misc_data.get('EE_Asset_QSVehicle2', 0)),
-                'vehicle_3_qs': float(misc_data.get('EE_Asset_QSVehicle3', 0)),
-                'vehicle_4_qs': float(misc_data.get('EE_Asset_QSVehicle4', 0))
+                'vehicle_1_qs': self._safe_float(misc_data.get('EE_Asset_QSVehicle1', 0)),
+                'vehicle_2_qs': self._safe_float(misc_data.get('EE_Asset_QSVehicle2', 0)),
+                'vehicle_3_qs': self._safe_float(misc_data.get('EE_Asset_QSVehicle3', 0)),
+                'vehicle_4_qs': self._safe_float(misc_data.get('EE_Asset_QSVehicle4', 0))
             },
-            'investments': float(misc_data.get('EE_Asset_QSInvestments', 0)),
-            'life_insurance': float(misc_data.get('EE_Asset_QSLifeInsurance', 0)),
-            'personal_effects': float(misc_data.get('EE_Asset_QSEffects', 0)),
-            'other_assets': float(misc_data.get('EE_Asset_QSOther', 0)),
+            'investments': self._safe_float(misc_data.get('EE_Asset_QSInvestments', 0)),
+            'life_insurance': self._safe_float(misc_data.get('EE_Asset_QSLifeInsurance', 0)),
+            'personal_effects': self._safe_float(misc_data.get('EE_Asset_QSEffects', 0)),
+            'other_assets': self._safe_float(misc_data.get('EE_Asset_QSOther', 0)),
             'business_assets': {
-                'cash': float(misc_data.get('EE_Asset_BizCash', 0)),
-                'bank_accounts': float(misc_data.get('EE_Asset_BizBankAccounts', 0)),
-                'receivables': float(misc_data.get('EE_Asset_BizReceivables', 0)),
-                'properties': float(misc_data.get('EE_Asset_BizProperties', 0)),
-                'tools': float(misc_data.get('EE_Asset_BizTools', 0)),
-                'other': float(misc_data.get('EE_Asset_BizOther', 0))
+                'cash': self._safe_float(misc_data.get('EE_Asset_BizCash', 0)),
+                'bank_accounts': self._safe_float(misc_data.get('EE_Asset_BizBankAccounts', 0)),
+                'receivables': self._safe_float(misc_data.get('EE_Asset_BizReceivables', 0)),
+                'properties': self._safe_float(misc_data.get('EE_Asset_BizProperties', 0)),
+                'tools': self._safe_float(misc_data.get('EE_Asset_BizTools', 0)),
+                'other': self._safe_float(misc_data.get('EE_Asset_BizOther', 0))
             }
         }
     
@@ -215,24 +227,24 @@ class ClientDataFormatter:
         """Organize business income and expense data"""
         return {
             'income': {
-                'gross_receipts': float(misc_data.get('BizIncome_GrossReceipts', 0)),
-                'gross_rental': float(misc_data.get('BizIncome_GrossRental', 0)),
-                'interest': float(misc_data.get('BizIncome_Interest', 0)),
-                'dividends': float(misc_data.get('BizIncome_Dividends', 0)),
-                'cash': float(misc_data.get('BizIncome_Cash', 0)),
-                'total': float(misc_data.get('BizIncome_Total', 0))
+                'gross_receipts': self._safe_float(misc_data.get('BizIncome_GrossReceipts', 0)),
+                'gross_rental': self._safe_float(misc_data.get('BizIncome_GrossRental', 0)),
+                'interest': self._safe_float(misc_data.get('BizIncome_Interest', 0)),
+                'dividends': self._safe_float(misc_data.get('BizIncome_Dividends', 0)),
+                'cash': self._safe_float(misc_data.get('BizIncome_Cash', 0)),
+                'total': self._safe_float(misc_data.get('BizIncome_Total', 0))
             },
             'expenses': {
-                'materials': float(misc_data.get('BizExpense_Materials', 0)),
-                'inventory': float(misc_data.get('BizExpense_Inventory', 0)),
-                'wages': float(misc_data.get('BizExpense_Wages', 0)),
-                'rent': float(misc_data.get('BizExpense_Rent', 0)),
-                'supplies': float(misc_data.get('BizExpense_Supplies', 0)),
-                'vehicle_gas': float(misc_data.get('BizExpense_VehicleGas', 0)),
-                'vehicle_repairs': float(misc_data.get('BizExpense_VehicleRepairs', 0)),
-                'insurance': float(misc_data.get('BizExpense_Insurance', 0)),
-                'taxes': float(misc_data.get('BizExpense_Taxes', 0)),
-                'utilities': float(misc_data.get('BizExpense_Utilities', 0)),
-                'total': float(misc_data.get('BizExpense_Total', 0))
+                'materials': self._safe_float(misc_data.get('BizExpense_Materials', 0)),
+                'inventory': self._safe_float(misc_data.get('BizExpense_Inventory', 0)),
+                'wages': self._safe_float(misc_data.get('BizExpense_Wages', 0)),
+                'rent': self._safe_float(misc_data.get('BizExpense_Rent', 0)),
+                'supplies': self._safe_float(misc_data.get('BizExpense_Supplies', 0)),
+                'vehicle_gas': self._safe_float(misc_data.get('BizExpense_VehicleGas', 0)),
+                'vehicle_repairs': self._safe_float(misc_data.get('BizExpense_VehicleRepairs', 0)),
+                'insurance': self._safe_float(misc_data.get('BizExpense_Insurance', 0)),
+                'taxes': self._safe_float(misc_data.get('BizExpense_Taxes', 0)),
+                'utilities': self._safe_float(misc_data.get('BizExpense_Utilities', 0)),
+                'total': self._safe_float(misc_data.get('BizExpense_Total', 0))
             }
         } 
