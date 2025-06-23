@@ -120,6 +120,14 @@ class ClientDataFormatter:
             'raw_data': raw_data  # Keep for debugging/reference
         }
     
+    def _safe_int(self, value, default=0):
+        try:
+            if value is None or value == '':
+                return default
+            return int(float(value))
+        except (ValueError, TypeError):
+            return default
+    
     def _organize_financial_data(self, misc_data: Dict, raw_data: Dict) -> Dict:
         """Organize financial data from MiscXML and other fields"""
         return {
@@ -144,11 +152,11 @@ class ClientDataFormatter:
             'assets': self._organize_assets(misc_data),
             'business': self._organize_business_data(misc_data),
             'family': {
-                'household_size': int(misc_data.get('ClientDetailHousehold', 0)),
-                'members_under_65': int(misc_data.get('FamilyMembersUnder65', 0)),
-                'members_over_65': int(misc_data.get('FamilyMembersOver65', 0)),
+                'household_size': self._safe_int(misc_data.get('ClientDetailHousehold', 0)),
+                'members_under_65': self._safe_int(misc_data.get('FamilyMembersUnder65', 0)),
+                'members_over_65': self._safe_int(misc_data.get('FamilyMembersOver65', 0)),
                 'dependents': misc_data.get('NumberOfDependents', ''),
-                'vehicle_count': int(misc_data.get('VehicleCount', 0))
+                'vehicle_count': self._safe_int(misc_data.get('VehicleCount', 0))
             }
         }
     

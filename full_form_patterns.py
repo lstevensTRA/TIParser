@@ -311,12 +311,11 @@ form_patterns.update({
         'category': 'Non-SE',  # Non-Self-Employment
         'fields': {
             # Income Fields
-            'Total Benefits Paid': r'Total benefits paid[:\s]*\$([\d,.]+)',
-            # Not Income Fields
+            'Total Benefits Paid': r'Pensions and Annuities \(Total Benefits Paid\)[:\s]*[\r\n\s]*\$?([\d,.]+)',
             'Repayments': r'Repayments[:\s]*\$([\d,.]+)',
-            'TY Payments': r'TY payments (any year)[:\s]*\$([\d,.]+)',
-            # Withholdings
-            'Federal Withholding': r'Tax withheld[:\s]*\$([\d,.]+)'
+            # Matches lines like 'TY 2022 Payments: $20,808.00' and captures year and value
+            'TY Payments': r'TY (\d{4}) Payments[:\s]*\$([\d,.]+)',
+            'Federal Withholding': r'Tax Withheld[:\s]*\$([\d,.]+)'
         },
         'calculation': {
             # Income Calculation: Filing status-dependent logic
@@ -326,10 +325,9 @@ form_patterns.update({
                 ) or (
                     filing_status in ['MFS', 'MFJ'] and combined_income > 34000
                 ) else (
-                    float(fields.get('Total Benefits Paid', 0)) * 0 if combined_income == 0 else 0
+                    float(fields.get('Total Benefits Paid', 0)) * 0.85 if combined_income == 0 else 0
                 )
             ),
-            # Withholding Calculation
             'Withholding': lambda fields: (
                 float(fields.get('Federal Withholding', 0))
             )
@@ -466,11 +464,7 @@ form_patterns.update({
             'Federal Withholding': None  # No withholdings
         },
         'calculation': {
-            'Income': lambda fields: (
-                (float(fields.get('Exercise Fair Market Value', 0)) -
-                 float(fields.get('Exercise Price Per Share (EPS)', 0))) *
-                float(fields.get('Number of Shares Transferred', 0))
-            ),
+            'Income': lambda fields: 0,  # ISO exercises are not income until sale; keep for cost basis reference
             'Withholding': lambda fields: 0  # No withholdings
         }
     },
@@ -538,9 +532,7 @@ form_patterns.update({
             'Federal Withholding': None  # No withholdings
         },
         'calculation': {
-            'Income': lambda fields: (
-                float(fields.get('Fair Market Value of Account', 0))
-            ),
+            'Income': lambda fields: 0,  # Account balances are not income
             'Withholding': lambda fields: 0  # No withholdings
         }
     },
@@ -563,15 +555,12 @@ form_patterns.update({
         'pattern': r'Form 1098(?!-E)',  # Match 'Form 1098' but not 'Form 1098-E'
         'category': 'Neither',
         'fields': {
-            'Outstanding Mortgage Principal': r'Outstanding mortgage principal[:\s]*\$([\d,.]+)',
-            'Mortgage Interest Received': r'Mortgage interest received[:\s]*\$([\d,.]+)',
+            'Outstanding Mortgage Principal': r'Outstanding Mortgage Principle[:\s]*\$([\d,.]+)',
+            'Mortgage Interest Received': r'Mortgage Interest Received from Payer\(s\)/Borrower\(s\)[:\s]*\$([\d,.]+)',
             'Federal Withholding': None
         },
         'calculation': {
-            'Income': lambda fields: (
-                float(fields.get('Outstanding Mortgage Principal', 0)) +
-                float(fields.get('Mortgage Interest Received', 0))
-            ),
+            'Income': lambda fields: 0,  # Mortgage amounts are not income and are for deduction/reference only
             'Withholding': lambda fields: 0
         }
     },
@@ -584,9 +573,7 @@ form_patterns.update({
             'Received by Lender': r'Received by Lender[:\s]*\$([\d,.]+)',
         },
         'calculation': {
-            'Income': lambda fields: (
-                float(fields.get('Received by Lender', 0))
-            ),
+            'Income': lambda fields: 0,  # Student loan interest is not income and may be deductible
             'Withholding': lambda fields: 0
         }
     },
@@ -602,9 +589,7 @@ form_patterns.update({
             'Federal Withholding': None  # No withholdings
         },
         'calculation': {
-            'Income': lambda fields: (
-                float(fields.get('Qualified Tuition and Related Expenses', 0))
-            ),
+            'Income': lambda fields: 0,  # Tuition is an expense, not income
             'Withholding': lambda fields: 0  # No withholdings
         }
     },
@@ -622,8 +607,7 @@ form_patterns.update({
         },
         'calculation': {
             'Income': lambda fields: (
-                float(fields.get('Amount of Debt Discharged', 0)) +
-                float(fields.get('Property Fair Market Value', 0))
+                float(fields.get('Amount of Debt Discharged', 0))  # Only debt discharge is potentially taxable; property value is informational
             ),
             'Withholding': lambda fields: 0  # No withholdings
         }
@@ -640,9 +624,7 @@ form_patterns.update({
             'Federal Withholding': None  # No withholdings
         },
         'calculation': {
-            'Income': lambda fields: (
-                float(fields.get('Gross Distributions', 0))
-            ),
+            'Income': lambda fields: 0,  # Distributions may be non-taxable if used for qualified expenses
             'Withholding': lambda fields: 0  # No withholdings
         }
     },
@@ -658,9 +640,7 @@ form_patterns.update({
             'Federal Withholding': None  # No withholdings
         },
         'calculation': {
-            'Income': lambda fields: (
-                float(fields.get('MSA Gross Distributions', 0))
-            ),
+            'Income': lambda fields: 0,  # Distributions may be non-taxable if used for qualified expenses
             'Withholding': lambda fields: 0  # No withholdings
         }
     },
@@ -676,9 +656,7 @@ form_patterns.update({
             'Federal Withholding': None  # No withholdings
         },
         'calculation': {
-            'Income': lambda fields: (
-                float(fields.get('Gross Benefits', 0))
-            ),
+            'Income': lambda fields: 0,  # Distributions may be non-taxable if used for qualified expenses
             'Withholding': lambda fields: 0  # No withholdings
         }
     }

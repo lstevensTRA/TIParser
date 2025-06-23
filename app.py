@@ -14,6 +14,7 @@ import PyPDF2
 import pandas as pd
 from parsers.at_codes import interpret_transaction
 from utils.api_client import render_client_profile_tab
+from collections import defaultdict
 
 # Configure logging
 logging.basicConfig(
@@ -243,6 +244,11 @@ def extract_form_data(text, form_patterns, tax_year, filing_status='Single', com
     
     write_out("Starting form pattern matching")
     
+    # Track if any form-like text is found but not matched
+    form_like_sections = []
+    for match in re.finditer(r'Form [A-Z0-9\-]+', text, re.IGNORECASE):
+        form_like_sections.append((match.group(0), match.start(), match.end()))
+
     # Process each form type
     for form_name, pattern_info in form_patterns.items():
         write_out(f"Processing form: {form_name}")
@@ -293,23 +299,50 @@ def extract_form_data(text, form_patterns, tax_year, filing_status='Single', com
             write_out("Starting field extraction")
             for field_name, regex in pattern_info['fields'].items():
                 if regex:
-                    field_match = re.search(regex, form_text, re.IGNORECASE)
-                    if field_match:
-                        value = to_float(field_match.group(1))
-                        fields_data[field_name] = value
-                        write_out(f"Field {field_name} = {value}")
-                        write_out(f"Matched text for {field_name}: {field_match.group(0)}")
+                    # For fields that may have multiple matches (like TY Payments), collect all
+                    if field_name == 'TY Payments':
+                        all_ty = re.findall(regex, form_text, re.IGNORECASE)
+                        if all_ty:
+                            fields_data[field_name] = all_ty
+                            write_out(f"Field {field_name} = {all_ty}")
+                        else:
+                            write_out(f"Field {field_name} - No match found (Regex: {regex})")
+                            write_out(f"Raw snippet: {form_text[:200]}...")
                     else:
-                        write_out(f"Field {field_name} - No match found")
+                        field_match = re.search(regex, form_text, re.IGNORECASE)
+                        if field_match:
+                            value = to_float(field_match.group(1))
+                            fields_data[field_name] = value
+                            write_out(f"Field {field_name} = {value}")
+                            write_out(f"Matched text for {field_name}: {field_match.group(0)}")
+                        else:
+                            write_out(f"Field {field_name} - No match found (Regex: {regex})")
+                            write_out(f"Raw snippet: {form_text[:200]}...")
+            write_out(f"All extracted fields for {form_name}: {fields_data}")
             
             if not fields_data:
-                write_out(f"Form {form_name} matched but no fields were captured")
+                write_out(f"Form {form_name} matched but no fields were captured. Fields attempted: {list(pattern_info['fields'].keys())}")
+                write_out(f"Raw form text snippet: {form_text[:300]}...")
                 continue
             
             # Calculate income and withholding using the form's calculation rules
             calc = pattern_info['calculation']
-            income = calc['Income'](fields_data, filing_status, combined_income) if 'filing_status' in calc['Income'].__code__.co_varnames else calc['Income'](fields_data)
-            withholding = calc['Withholding'](fields_data) if callable(calc.get('Withholding')) else 0
+            try:
+                if 'filing_status' in calc['Income'].__code__.co_varnames:
+                    income = calc['Income'](fields_data, filing_status, combined_income)
+                    write_out(f"Income calculation for {form_name}: fields={fields_data}, filing_status={filing_status}, combined_income={combined_income} => {income}")
+                else:
+                    income = calc['Income'](fields_data)
+                    write_out(f"Income calculation for {form_name}: fields={fields_data} => {income}")
+            except Exception as e:
+                income = 0
+                write_out(f"ERROR: Income calculation for {form_name} failed: {e}")
+            try:
+                withholding = calc['Withholding'](fields_data) if callable(calc.get('Withholding')) else 0
+                write_out(f"Withholding calculation for {form_name}: fields={fields_data} => {withholding}")
+            except Exception as e:
+                withholding = 0
+                write_out(f"ERROR: Withholding calculation for {form_name} failed: {e}")
             category = pattern_info.get('category', 'Neither')
             
             write_out(f"Calculated values - Income: {income}, Withholding: {withholding}, Category: {category}")
@@ -327,7 +360,15 @@ def extract_form_data(text, form_patterns, tax_year, filing_status='Single', com
                 'Category': category,
                 'Fields': fields_data
             })
-    
+    # After all pattern matching, log any form-like text that was not matched by any pattern
+    matched_spans = []
+    for form_name, pattern_info in form_patterns.items():
+        for m in re.finditer(pattern_info['pattern'], text, re.MULTILINE):
+            matched_spans.append((m.start(), m.end()))
+    for form_label, start, end in form_like_sections:
+        if not any(ms <= start < me for ms, me in matched_spans):
+            snippet = text[start-30:end+70] if start > 30 else text[start:end+70]
+            write_out(f"Potential form detected in text but no pattern matched: '{form_label}' at position {start}. Snippet: {snippet}")
     write_out("Form processing completed")
     return results
 
@@ -564,15 +605,41 @@ def process_wi_documents(case_id, wi_files):
                     
                     form_matching_results.append(file_results)
                     
-                    # Process forms
+                    # Process forms (first pass: all except SSA-1099)
                     forms_data = extract_form_data(text, form_patterns, tax_year, output_buffer=log_buffer)
                     if forms_data:
-                        # forms_data is a dictionary with tax years as keys
                         for year, year_forms in forms_data.items():
                             if year not in all_data:
                                 all_data[year] = []
-                            all_data[year].extend(year_forms)
-            
+                            # Separate SSA-1099 and others
+                            non_ssa_forms = [f for f in year_forms if f['Form'] != 'SSA-1099']
+                            ssa_forms = [f for f in year_forms if f['Form'] == 'SSA-1099']
+                            all_data[year].extend(non_ssa_forms)
+                            # Calculate combined income for the year (excluding SSA-1099)
+                            combined_income = sum(f['Income'] for f in non_ssa_forms if f.get('Income') is not None)
+                            # Get marital status from client profile (if available)
+                            client_data = st.session_state.get('client_data') or st.session_state.get('client_profile_data')
+                            marital_status = 'Single'
+                            if client_data:
+                                marital_status = client_data.get('client_info', {}).get('marital_status', 'Single')
+                            # Now process SSA-1099 forms with correct combined_income and marital_status
+                            for ssa_form in ssa_forms:
+                                fields = ssa_form.get('Fields', {})
+                                calc = form_patterns['SSA-1099']['calculation']
+                                try:
+                                    income = calc['Income'](fields, marital_status, combined_income)
+                                    logger.info(f"SSA-1099 calculation: fields={fields}, marital_status={marital_status}, combined_income={combined_income} => {income}")
+                                except Exception as e:
+                                    income = 0
+                                    logger.info(f"ERROR: SSA-1099 income calculation failed: {e}")
+                                try:
+                                    withholding = calc['Withholding'](fields) if callable(calc.get('Withholding')) else 0
+                                except Exception as e:
+                                    withholding = 0
+                                    logger.info(f"ERROR: SSA-1099 withholding calculation failed: {e}")
+                                ssa_form['Income'] = income
+                                ssa_form['Withholding'] = withholding
+                                all_data[year].append(ssa_form)
             # Update progress bar
             progress_bar.progress((idx + 1) / total_files)
     
@@ -650,8 +717,8 @@ def render_wi_parser():
         return
 
     # Set up Streamlit tabs
-    summary_tab, tax_projection_tab, json_tab, form_matching_tab, log_tab = st.tabs([
-        "Summary", "Tax Projection", "JSON", "Form Matching", "Logs"
+    summary_tab, critical_tab, tax_projection_tab, json_tab, form_matching_tab, log_tab = st.tabs([
+        "Summary", "Critical Issues", "Tax Projection", "JSON", "Form Matching", "Logs"
     ])
 
     with summary_tab:
@@ -715,6 +782,80 @@ def render_wi_parser():
         else:
             st.info("📝 No Wage & Income data extracted")
     
+    with critical_tab:
+        st.subheader("Critical Extraction Issues & Forms to Check")
+        wi_log = st.session_state.get('wi_log', '')
+        wi_text = None
+        if 'wi_data' in st.session_state and st.session_state['wi_data']:
+            pass  # Placeholder for future enhancement
+        if not wi_log:
+            st.info("No log data available yet.")
+        else:
+            import re
+            from collections import defaultdict
+            def extract_full_form_snippet(form_name, text):
+                pattern = re.compile(rf'(Form {re.escape(form_name)})', re.IGNORECASE)
+                match = pattern.search(text)
+                if not match:
+                    return text[:500]  # fallback
+                start = match.start()
+                next_form = re.compile(r'\nForm [A-Z0-9\-]+', re.IGNORECASE)
+                next_match = next_form.search(text, match.end())
+                end = next_match.start() if next_match else len(text)
+                return text[start:end].strip()
+            no_fields = []
+            form_no_match = []
+            regex_failures = []
+            form_status = defaultdict(lambda: 'Not Attempted')
+            pattern_matched_no_data = set()
+            # Find forms with no fields captured
+            for m in re.finditer(r"Form ([A-Z0-9\- ()]+) matched but no fields were captured\. Fields attempted: (.+?)\nRaw form text snippet: (.+?)\.\.\.\n", wi_log, re.DOTALL):
+                form, fields, snippet = m.groups()
+                full_snippet = extract_full_form_snippet(form, wi_log)
+                no_fields.append({"form": form.strip(), "fields": fields, "snippet": full_snippet})
+                form_status[form.strip()] = 'Pattern Matched, No Data Extracted'
+                pattern_matched_no_data.add(form.strip())
+            for m in re.finditer(r"Potential form detected in text but no pattern matched: '([^']+)' at position \d+\. Snippet: (.+?)\n", wi_log, re.DOTALL):
+                form_label, snippet = m.groups()
+                full_snippet = extract_full_form_snippet(form_label, wi_log)
+                form_no_match.append({"form": form_label.strip(), "snippet": full_snippet})
+            for m in re.finditer(r"Field ([^ ]+) - No match found \(Regex: ([^\)]+)\)\nRaw snippet: (.+?)\.\.\.\n", wi_log, re.DOTALL):
+                field, regex, snippet = m.groups()
+                regex_failures.append({"field": field, "regex": regex, "snippet": snippet.strip()})
+            for m in re.finditer(r"Processing form: ([A-Z0-9\- ()]+)\n(Form \1: No pattern match found|Form \1 #[0-9]+:|Form \1: No pattern match found)", wi_log):
+                form = m.group(1).strip()
+                if f"Form {form}: No pattern match found" in m.group(0):
+                    if form_status[form] != 'Pattern Matched, No Data Extracted':
+                        form_status[form] = 'No Pattern Match'
+                else:
+                    if form_status[form] not in ['Fail', 'Pattern Matched, No Data Extracted']:
+                        form_status[form] = 'Success'
+            st.markdown("### Forms Extraction Status")
+            status_colors = {'Success': 'green', 'Fail': 'red', 'Pattern Matched, No Data Extracted': 'orange', 'No Pattern Match': 'gray', 'Not Attempted': 'gray'}
+            for form, status in sorted(form_status.items()):
+                color = status_colors.get(status, 'gray')
+                st.markdown(f"- <span style='color:{color};font-weight:bold'>{form}: {status}</span>", unsafe_allow_html=True)
+            if no_fields:
+                st.markdown("---\n#### Forms Detected but No Fields Extracted")
+                for issue in no_fields:
+                    st.error(f"**{issue['form']}**: Pattern matched, but no fields extracted. Fields attempted: {issue['fields']}")
+                    with st.expander("Show raw form text snippet"):
+                        st.code(issue['snippet'])
+            if form_no_match:
+                st.markdown("---\n#### Potential Forms Detected but No Pattern Matched")
+                for issue in form_no_match:
+                    st.warning(f"**{issue['form']}**: Detected in text but no pattern matched.")
+                    with st.expander("Show text snippet"):
+                        st.code(issue['snippet'])
+            if regex_failures:
+                st.markdown("---\n#### Field Extraction Regex Failures")
+                for issue in regex_failures:
+                    st.info(f"Field **{issue['field']}**: Regex `{issue['regex']}` failed.")
+                    with st.expander("Show raw snippet"):
+                        st.code(issue['snippet'])
+            if not (no_fields or form_no_match or regex_failures):
+                st.success("No critical extraction issues detected!")
+
     with tax_projection_tab:
         render_tax_projection(st.session_state['wi_projection'])
         
@@ -725,19 +866,38 @@ def render_wi_parser():
     with form_matching_tab:
         st.subheader("Form Pattern Matching")
         st.write(f"Found {len(st.session_state['wi_form_matching'])} WI documents.")
-        
+        wi_data = st.session_state.get('wi_data', {})
+        wi_summary = st.session_state.get('wi_summary', [])
+        wi_projection = st.session_state.get('wi_projection', [])
         # Display form matching results
         for result in st.session_state['wi_form_matching']:
             st.markdown(f"**Processing: {result['filename']}**")
+            if result.get('owner'):
+                st.text(f"Owner: {result['owner']}")
             if result['ssn'] and result['tax_period']:
                 st.text(f"SSN: {result['ssn']} | Tax Period: {result['tax_period']}")
                 st.text("-" * 50)
-            
             st.text("🔍 Form Pattern Matching:")
+            # Try to find extracted/calculated data for this file (by year)
+            # We'll use wi_data and wi_summary for this
             for match in result['form_matches']:
-                st.text(f"📋 {match['form_name']}:")
+                form_name = match['form_name']
+                st.text(f"📋 {form_name}:")
                 if match['matched']:
                     st.text("✅ Match found")
+                    # Try to show extracted/calculated data for this form in this year
+                    # We'll look in wi_data for the relevant year
+                    # This is a best-effort, as the mapping may not be perfect
+                    found = False
+                    for year, forms in wi_data.items():
+                        for form in forms:
+                            if form.get('Form') == form_name:
+                                found = True
+                                st.markdown(f"- **Extracted Fields:** {form.get('Fields', {})}")
+                                st.markdown(f"- **Income:** {form.get('Income', 'N/A')}")
+                                st.markdown(f"- **Withholding:** {form.get('Withholding', 'N/A')}")
+                    if not found:
+                        st.warning("Pattern matched, but no fields extracted or calculated.")
                 else:
                     st.text("❌ No match found")
             st.markdown("---")
@@ -2220,6 +2380,61 @@ def render_comprehensive_analysis():
         st.subheader("Complete Analysis Data (JSON)")
         st.json(analysis)
 
+def render_comparison_tab():
+    st.title("Income Comparison: Client vs Wage & Income Transcript")
+    st.markdown("---")
+    # Get client profile data (support both keys)
+    client_data = st.session_state.get('client_data') or st.session_state.get('client_profile_data')
+    wi_summary = st.session_state.get('wi_summary')
+    
+    if not client_data or not wi_summary:
+        st.warning("Client profile or Wage & Income summary data not available.")
+        return
+
+    # Try to get Monthly Net from both possible structures
+    monthly_net = None
+    # Structure 1: financial_profile > income > monthly_net
+    try:
+        monthly_net = client_data['financial_profile']['income']['monthly_net']
+    except Exception:
+        pass
+    # Structure 2: financial_profile > income > total (fallback if monthly_net missing)
+    if monthly_net is None:
+        try:
+            monthly_net = client_data['financial_profile']['income']['total'] / 12
+        except Exception:
+            pass
+    # Structure 3: other possible keys (add more as needed)
+    # ...
+    if monthly_net is None:
+        st.warning("Could not retrieve Monthly Net from client profile data.")
+        return
+    client_annual_income = monthly_net * 12
+
+    # Get most recent year from WI summary
+    most_recent_row = max(wi_summary, key=lambda x: int(x['Tax Year']))
+    transcript_income = most_recent_row['Total Income']
+    if isinstance(transcript_income, str):
+        transcript_income = float(str(transcript_income).replace("$", "").replace(",", ""))
+
+    # Calculate percentage difference
+    if transcript_income == 0:
+        percent_diff = float('inf')
+    else:
+        percent_diff = ((client_annual_income - transcript_income) / transcript_income) * 100
+
+    # Display results
+    st.subheader(f"Most Recent Year: {most_recent_row['Tax Year']}")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Client Annual Net (Self-Reported)", f"${client_annual_income:,.2f}")
+    with col2:
+        st.metric("Transcript Total Income", f"${transcript_income:,.2f}")
+    with col3:
+        st.metric("% Difference", f"{percent_diff:.2f}%")
+    st.markdown("---")
+    st.write("This comparison shows how close the client's self-reported income is to the IRS Wage & Income transcript for the most recent year.")
+
 def main():
     st.set_page_config(
         page_title="IRS Transcript Parser",
@@ -2234,6 +2449,40 @@ def main():
         st.session_state['wi_data'] = {}
     if 'at_data' not in st.session_state:
         st.session_state['at_data'] = []
+    if 'client_data' not in st.session_state:
+        st.session_state['client_data'] = None
+
+    # --- Recent/Test Case IDs for quick selection ---
+    recent_cases = [
+        '732334',
+        '772078',
+        '864274',
+        '884562',
+        '909511',
+        '923478',
+        '960159',
+        '1063234',
+        '1111606',
+        '106379',
+        '1110004',
+        '44944',
+        '697391',
+        '901733',
+        '750248',
+        '1037050',
+        '1064152',
+        '1011490',
+        '654986',
+        '1029024',
+    ]
+    st.sidebar.markdown("**Quick Select Case ID**")
+    selected_case = st.sidebar.selectbox(
+        "Choose a recent/test case:",
+        ["(None)"] + recent_cases,
+        index=0
+    )
+    if selected_case != "(None)":
+        st.session_state['case_id'] = selected_case
 
     # Sidebar navigation
     st.sidebar.title("Navigation")
@@ -2241,7 +2490,7 @@ def main():
     # Radio button for page selection
     page = st.sidebar.radio(
         "Choose a page:",
-        ["🏠 Home", "📄 WI Parser", "📊 AT Parser", "📋 ROA Parser", "📝 TRT Parser", "📈 Tax Summary", "📊 Comprehensive Analysis", "📋 Client Profile", "⚙️ Settings"],
+        ["🏠 Home", "📄 WI Parser", "📊 AT Parser", "📋 ROA Parser", "📝 TRT Parser", "📊 Comprehensive Analysis", "📋 Client Profile", "⚙️ Settings", "📊 Comparison"],
         index=0
     )
 
@@ -2256,14 +2505,14 @@ def main():
         render_roa_parser()
     elif page == "📝 TRT Parser":
         render_trt_parser()
-    elif page == "📈 Tax Summary":
-        render_tax_summary()
     elif page == "📊 Comprehensive Analysis":
         render_comprehensive_analysis()
     elif page == "📋 Client Profile":
         render_client_profile_tab()
     elif page == "⚙️ Settings":
         render_settings()
+    elif page == "📊 Comparison":
+        render_comparison_tab()
 
 if __name__ == "__main__":
     main()
