@@ -15,6 +15,8 @@ import pandas as pd
 from parsers.at_codes import interpret_transaction
 from utils.api_client import render_client_profile_tab
 from collections import defaultdict
+from io import BytesIO
+
 
 # Configure logging
 logging.basicConfig(
@@ -124,8 +126,8 @@ def get_wi_files(case_id: str) -> list:
             if not name:
                 continue
 
-            # Check for WI in the filename
-            if "WI" in name:
+            # Check for standalone WI in the filename (not part of another word)
+            if re.search(r'\bWI\s+\d', name):  # Matches "WI" followed by a space and a number
                 case_doc_id = doc.get("CaseDocumentID")
                 if case_doc_id:
                     wi_files.append({
@@ -232,7 +234,7 @@ def extract_header_info(text):
     
     return ssn, tax_periods, tax_year
 
-def extract_form_data(text, form_patterns, tax_year, filing_status='Single', combined_income=0, output_buffer=None):
+def extract_form_data(text, form_patterns, tax_year, filing_status='Single', combined_income=0, output_buffer=None, filename=None):
     """Extract form data from text using patterns"""
     results = {}
     
@@ -246,8 +248,20 @@ def extract_form_data(text, form_patterns, tax_year, filing_status='Single', com
     
     # Track if any form-like text is found but not matched
     form_like_sections = []
-    for match in re.finditer(r'Form [A-Z0-9\-]+', text, re.IGNORECASE):
-        form_like_sections.append((match.group(0), match.start(), match.end()))
+    # Only match 'Form XXXX' at the start of a line (optionally with whitespace), not in the middle of instructions
+    for match in re.finditer(r'(^|\n)\s*Form [A-Z0-9\-]+', text, re.IGNORECASE):
+        # Get the actual matched string (strip leading newline/whitespace)
+        form_str = match.group(0).strip()
+        # Get the line containing the match
+        line_start = text.rfind('\n', 0, match.start()) + 1
+        line_end = text.find('\n', match.end())
+        if line_end == -1:
+            line_end = len(text)
+        line = text[line_start:line_end].strip()
+        # Ignore if the line contains 'Check Box', 'Applicable', 'Transactions that do not flow', or 'Indicator'
+        if re.search(r'check box|applicable|transactions that do not flow|indicator', line, re.IGNORECASE):
+            continue
+        form_like_sections.append((form_str, match.start(), match.end()))
 
     # Process each form type
     for form_name, pattern_info in form_patterns.items():
@@ -368,7 +382,8 @@ def extract_form_data(text, form_patterns, tax_year, filing_status='Single', com
     for form_label, start, end in form_like_sections:
         if not any(ms <= start < me for ms, me in matched_spans):
             snippet = text[start-30:end+70] if start > 30 else text[start:end+70]
-            write_out(f"Potential form detected in text but no pattern matched: '{form_label}' at position {start}. Snippet: {snippet}")
+            fname = filename if filename else "UNKNOWN"
+            write_out(f"Potential form detected in text but no pattern matched: '{form_label}' at position {start}. [FILENAME: {fname}] Snippet: {snippet}")
     write_out("Form processing completed")
     return results
 
@@ -552,6 +567,11 @@ def render_home():
         else:
             st.info("Please ensure you have valid cookies before checking for documents.")
 
+    # After this line:
+    wi_files = get_wi_files(case_id)
+    # Add this:
+    st.session_state['wi_files'] = wi_files
+
 def process_wi_documents(case_id, wi_files):
     """Process all WI documents once and store results"""
     all_data = {}
@@ -566,7 +586,7 @@ def process_wi_documents(case_id, wi_files):
     with st.spinner("Processing Wage & Income documents..."):
         progress_bar = st.progress(0)
         total_files = len(wi_files)
-        
+        wi_texts = {}  # Store extracted text by filename
         for idx, wi_file in enumerate(wi_files):
             logger.info(f"\n{'='*50}")
             logger.info(f"Processing file: {wi_file['FileName']}")
@@ -576,6 +596,7 @@ def process_wi_documents(case_id, wi_files):
             if pdf_bytes:
                 text = extract_text_from_pdf(pdf_bytes)
                 if text:
+                    wi_texts[wi_file['FileName']] = text
                     # Log the complete raw text
                     logger.info("Complete extracted text from PDF:")
                     logger.info("-" * 50)
@@ -606,7 +627,7 @@ def process_wi_documents(case_id, wi_files):
                     form_matching_results.append(file_results)
                     
                     # Process forms (first pass: all except SSA-1099)
-                    forms_data = extract_form_data(text, form_patterns, tax_year, output_buffer=log_buffer)
+                    forms_data = extract_form_data(text, form_patterns, tax_year, output_buffer=log_buffer, filename=wi_file['FileName'])
                     if forms_data:
                         for year, year_forms in forms_data.items():
                             if year not in all_data:
@@ -647,6 +668,7 @@ def process_wi_documents(case_id, wi_files):
     st.session_state['wi_data'] = all_data
     st.session_state['wi_log'] = log_buffer.getvalue()
     st.session_state['wi_form_matching'] = form_matching_results
+    st.session_state['wi_texts'] = wi_texts
     
     # Calculate and store summary data
     summary_data = []
@@ -725,13 +747,24 @@ def render_wi_parser():
         st.subheader("Income Summary")
         if st.session_state['wi_summary']:
             df = pd.DataFrame(st.session_state['wi_summary'])
+            # Calculate Estimated AGI
+            df['Estimated AGI'] = df['Total Income'] - (df['SE Income'] * 0.0765)
+            df['Estimated AGI'] = df['Estimated AGI'].round(2)
             # Format currency columns for display only
             display_df = df.copy()
             currency_cols = ['SE Income', 'SE Withholding', 'Non-SE Income', 'Non-SE Withholding', 
-                           'Other Income', 'Other Withholding', 'Total Income', 'Total Withholding']
+                           'Other Income', 'Other Withholding', 'Total Income', 'Estimated AGI', 'Total Withholding']
             for col in currency_cols:
                 display_df[col] = display_df[col].apply(lambda x: f"${x:,.2f}")
-            
+            # Reorder columns to put Estimated AGI after Total Income and before Total Withholding
+            cols = list(display_df.columns)
+            if 'Estimated AGI' in cols and 'Total Income' in cols and 'Total Withholding' in cols:
+                ti_idx = cols.index('Total Income')
+                tw_idx = cols.index('Total Withholding')
+                # Remove Estimated AGI and re-insert
+                cols.remove('Estimated AGI')
+                cols.insert(ti_idx + 1, 'Estimated AGI')
+                display_df = display_df[cols]
             # Display summary table
             st.table(display_df)
             
@@ -785,7 +818,7 @@ def render_wi_parser():
     with critical_tab:
         st.subheader("Critical Extraction Issues & Forms to Check")
         wi_log = st.session_state.get('wi_log', '')
-        wi_text = None
+        wi_texts = st.session_state.get('wi_texts', {})
         if 'wi_data' in st.session_state and st.session_state['wi_data']:
             pass  # Placeholder for future enhancement
         if not wi_log:
@@ -793,16 +826,39 @@ def render_wi_parser():
         else:
             import re
             from collections import defaultdict
-            def extract_full_form_snippet(form_name, text):
-                pattern = re.compile(rf'(Form {re.escape(form_name)})', re.IGNORECASE)
-                match = pattern.search(text)
-                if not match:
-                    return text[:500]  # fallback
-                start = match.start()
-                next_form = re.compile(r'\nForm [A-Z0-9\-]+', re.IGNORECASE)
-                next_match = next_form.search(text, match.end())
-                end = next_match.start() if next_match else len(text)
-                return text[start:end].strip()
+            def extract_full_form_snippet(form_name, text, start_pos=None, filename=None):
+                import re
+                debug_info = []
+                if text is None:
+                    return f"[DEBUG] No text found for filename: {filename}"
+                # If start_pos is provided, use it; otherwise, find the first occurrence
+                if start_pos is not None:
+                    start = start_pos
+                else:
+                    pattern = re.compile(rf'(Form[ \-]?{re.escape(form_name)})', re.IGNORECASE)
+                    match = pattern.search(text)
+                    start = match.start() if match else 0
+                # Find the next form after start
+                next_form_match = re.search(r'(\n|^)\s*Form [A-Z0-9\-]+', text[start+1:], re.IGNORECASE)
+                if next_form_match:
+                    end = start + 1 + next_form_match.start()
+                else:
+                    end = len(text)
+                # Debug info
+                debug_info.append(f"[DEBUG] Filename: {filename}")
+                debug_info.append(f"[DEBUG] Start pos: {start}")
+                debug_info.append(f"[DEBUG] End pos: {end}")
+                debug_info.append(f"[DEBUG] Text length: {len(text)}")
+                snippet = text[start:end] if 0 <= start < end <= len(text) else ''
+                debug_info.append(f"[DEBUG] Snippet length: {len(snippet)}")
+                debug_info.append(f"[DEBUG] Snippet preview: {snippet[:100]}")
+                if not snippet:
+                    debug_info.append("[DEBUG] No snippet extracted. Check indices and text.")
+                    return '\n'.join(debug_info)
+                # Highlight the matched form name at the start
+                pattern = re.compile(rf'(Form[ \-]?{re.escape(form_name)})', re.IGNORECASE)
+                snippet = pattern.sub(r'>>>\1<<<', snippet, count=1)
+                return '\n'.join(debug_info) + '\n' + snippet
             no_fields = []
             form_no_match = []
             regex_failures = []
@@ -811,13 +867,34 @@ def render_wi_parser():
             # Find forms with no fields captured
             for m in re.finditer(r"Form ([A-Z0-9\- ()]+) matched but no fields were captured\. Fields attempted: (.+?)\nRaw form text snippet: (.+?)\.\.\.\n", wi_log, re.DOTALL):
                 form, fields, snippet = m.groups()
-                full_snippet = extract_full_form_snippet(form, wi_log)
+                # Try to get the filename from [FILENAME: ...] in the log entry
+                file_match = re.search(r'\[FILENAME: ([^\]]+)\]', wi_log[m.start():m.end()])
+                filename = file_match.group(1) if file_match else None
+                wi_text = wi_texts.get(filename, wi_log)
+                full_snippet = extract_full_form_snippet(form, wi_text)
                 no_fields.append({"form": form.strip(), "fields": fields, "snippet": full_snippet})
                 form_status[form.strip()] = 'Pattern Matched, No Data Extracted'
                 pattern_matched_no_data.add(form.strip())
-            for m in re.finditer(r"Potential form detected in text but no pattern matched: '([^']+)' at position \d+\. Snippet: (.+?)\n", wi_log, re.DOTALL):
-                form_label, snippet = m.groups()
-                full_snippet = extract_full_form_snippet(form_label, wi_log)
+            # Build a set of all parsed forms by filename (from wi_data)
+            parsed_forms_by_file = {}
+            wi_data = st.session_state.get('wi_data', {})
+            for year, forms in wi_data.items():
+                for form in forms:
+                    filename = form.get('SourceFile') or form.get('filename') or None
+                    form_name = form.get('Form')
+                    if filename and form_name:
+                        if filename not in parsed_forms_by_file:
+                            parsed_forms_by_file[filename] = set()
+                        parsed_forms_by_file[filename].add(form_name)
+            for m in re.finditer(r"Potential form detected in text but no pattern matched: '([^']+)' at position (\d+)\. \[FILENAME: ([^\]]+)\] Snippet: (.+?)\n", wi_log, re.DOTALL):
+                form_label, pos_str, filename, snippet = m.groups()
+                wi_text = wi_texts.get(filename, None)
+                start_pos = int(pos_str)
+                # Only show as a critical issue if this form is NOT present in parsed_forms_by_file for this filename
+                parsed_forms = parsed_forms_by_file.get(filename, set())
+                if form_label.strip() in parsed_forms:
+                    continue  # Skip, it was actually parsed
+                full_snippet = extract_full_form_snippet(form_label, wi_text, start_pos=start_pos, filename=filename)
                 form_no_match.append({"form": form_label.strip(), "snippet": full_snippet})
             for m in re.finditer(r"Field ([^ ]+) - No match found \(Regex: ([^\)]+)\)\nRaw snippet: (.+?)\.\.\.\n", wi_log, re.DOTALL):
                 field, regex, snippet = m.groups()
@@ -885,23 +962,60 @@ def render_wi_parser():
                 st.text(f"📋 {form_name}:")
                 if match['matched']:
                     st.text("✅ Match found")
-                    # Try to show extracted/calculated data for this form in this year
-                    # We'll look in wi_data for the relevant year
-                    # This is a best-effort, as the mapping may not be perfect
                     found = False
                     for year, forms in wi_data.items():
                         for form in forms:
-                            if form.get('Form') == form_name:
+                            # Try to match by form name and filename/source
+                            form_file = form.get('SourceFile') or form.get('filename') or result['filename']
+                            if form.get('Form') == form_name and form_file == result['filename']:
                                 found = True
+                                # Show unique identifier if available
+                                unique_id = form.get('UniqueID')
+                                label = form.get('Label', '')
+                                extra = []
+                                if unique_id and unique_id != 'UNKNOWN':
+                                    extra.append(f"ID: {unique_id}")
+                                if label and label != 'UNKNOWN':
+                                    extra.append(label)
+                                if extra:
+                                    st.markdown(f"<span style='color: #888'>({' | '.join(extra)})</span>", unsafe_allow_html=True)
+                                st.markdown(f"<span style='color: #888'>Source File: {form_file}</span>", unsafe_allow_html=True)
                                 st.markdown(f"- **Extracted Fields:** {form.get('Fields', {})}")
                                 st.markdown(f"- **Income:** {form.get('Income', 'N/A')}")
                                 st.markdown(f"- **Withholding:** {form.get('Withholding', 'N/A')}")
+                                st.markdown("---")
                     if not found:
                         st.warning("Pattern matched, but no fields extracted or calculated.")
                 else:
                     st.text("❌ No match found")
             st.markdown("---")
-        
+    # In the Critical Issues tab, add debug output for cross-checking
+            # Build a set of all parsed forms by filename (from wi_data)
+            parsed_forms_by_file = {}
+            wi_data = st.session_state.get('wi_data', {})
+            for year, forms in wi_data.items():
+                for form in forms:
+                    filename = form.get('SourceFile') or form.get('filename') or None
+                    form_name = form.get('Form')
+                    if filename and form_name:
+                        if filename not in parsed_forms_by_file:
+                            parsed_forms_by_file[filename] = set()
+                        parsed_forms_by_file[filename].add(form_name)
+            # Debug: show parsed forms by file
+            st.markdown("<details><summary>Debug: Parsed forms by file</summary><pre>" + str(parsed_forms_by_file) + "</pre></details>", unsafe_allow_html=True)
+            for m in re.finditer(r"Potential form detected in text but no pattern matched: '([^']+)' at position (\d+)\. \[FILENAME: ([^\]]+)\] Snippet: (.+?)\n", wi_log, re.DOTALL):
+                form_label, pos_str, filename, snippet = m.groups()
+                wi_text = wi_texts.get(filename, None)
+                start_pos = int(pos_str)
+                # Only show as a critical issue if this form is NOT present in parsed_forms_by_file for this filename
+                parsed_forms = parsed_forms_by_file.get(filename, set())
+                # Debug: show cross-check for this form
+                st.markdown(f"<details><summary>Debug: Checking {form_label} in {filename}</summary><pre>Parsed forms: {parsed_forms}</pre></details>", unsafe_allow_html=True)
+                if form_label.strip() in parsed_forms:
+                    continue  # Skip, it was actually parsed
+                full_snippet = extract_full_form_snippet(form_label, wi_text, start_pos=start_pos, filename=filename)
+                form_no_match.append({"form": form_label.strip(), "snippet": full_snippet})
+
     with log_tab:
         st.subheader("Log Output")
         st.text(st.session_state.get('wi_log', ''))
@@ -1359,29 +1473,36 @@ def extract_at_data(text):
     """Extract data from Account Transcript text"""
     data = {}
     transactions = []
-    
     # Extract tax year - improved pattern matching
-    year_match = re.search(r'TAX PERIOD:\s*Dec\.\s*31,\s*(\d{4})', text, re.IGNORECASE)
+    # 1. Try 'Report for Tax Period Ending: 12-31-2022'
+    year_match = re.search(r'Report for Tax Period Ending:\s*\d{2}-\d{2}-(\d{4})', text)
     if year_match:
         year = year_match.group(1)
         data['tax_year'] = format_year(year)
-        logger.info(f"Found tax year from TAX PERIOD: {data['tax_year']}")
+        logger.info(f"Found tax year from Report for Tax Period Ending: {data['tax_year']}")
     else:
-        # Try alternative patterns if the main one doesn't work
-        year_match = re.search(r'Tax Period:\s*Dec\.\s*(\d{4})|Tax Period:\s*(\d{4})|TAX PERIOD:\s*(\d{4})', text, re.IGNORECASE)
+        # 2. Try 'TAX PERIOD: Dec. 31, 2022'
+        year_match = re.search(r'TAX PERIOD:\s*Dec\.\s*31,\s*(\d{4})', text, re.IGNORECASE)
         if year_match:
-            year = year_match.group(1) or year_match.group(2) or year_match.group(3)
+            year = year_match.group(1)
             data['tax_year'] = format_year(year)
-            logger.info(f"Found tax year from alternative pattern: {data['tax_year']}")
+            logger.info(f"Found tax year from TAX PERIOD: {data['tax_year']}")
         else:
-            # Try to extract year from filename or other patterns
-            year_match = re.search(r'(\d{4})', text)
+            # 3. Try alternative patterns
+            year_match = re.search(r'Tax Period:\s*Dec\.\s*(\d{4})|Tax Period:\s*(\d{4})|TAX PERIOD:\s*(\d{4})', text, re.IGNORECASE)
             if year_match:
-                data['tax_year'] = format_year(year_match.group(1))
-                logger.info(f"Found tax year from fallback pattern: {data['tax_year']}")
+                year = year_match.group(1) or year_match.group(2) or year_match.group(3)
+                data['tax_year'] = format_year(year)
+                logger.info(f"Found tax year from alternative pattern: {data['tax_year']}")
             else:
-                logger.warning("No tax year found")
-                data['tax_year'] = 'Unknown'
+                # 4. Try to extract year from filename or other patterns
+                year_match = re.search(r'(\d{4})', text)
+                if year_match:
+                    data['tax_year'] = format_year(year_match.group(1))
+                    logger.info(f"Found tax year from fallback pattern: {data['tax_year']}")
+                else:
+                    logger.warning("No tax year found")
+                    data['tax_year'] = 'Unknown'
     
     # Extract SSN (Taxpayer ID)
     ssn_match = re.search(r'TAXPAYER IDENTIFICATION NUMBER:\s*([\dX-]+)', text)
@@ -2386,6 +2507,7 @@ def render_comparison_tab():
     # Get client profile data (support both keys)
     client_data = st.session_state.get('client_data') or st.session_state.get('client_profile_data')
     wi_summary = st.session_state.get('wi_summary')
+    at_data = st.session_state.get('at_data', [])
     
     if not client_data or not wi_summary:
         st.warning("Client profile or Wage & Income summary data not available.")
@@ -2393,19 +2515,15 @@ def render_comparison_tab():
 
     # Try to get Monthly Net from both possible structures
     monthly_net = None
-    # Structure 1: financial_profile > income > monthly_net
     try:
         monthly_net = client_data['financial_profile']['income']['monthly_net']
     except Exception:
         pass
-    # Structure 2: financial_profile > income > total (fallback if monthly_net missing)
     if monthly_net is None:
         try:
             monthly_net = client_data['financial_profile']['income']['total'] / 12
         except Exception:
             pass
-    # Structure 3: other possible keys (add more as needed)
-    # ...
     if monthly_net is None:
         st.warning("Could not retrieve Monthly Net from client profile data.")
         return
@@ -2413,9 +2531,30 @@ def render_comparison_tab():
 
     # Get most recent year from WI summary
     most_recent_row = max(wi_summary, key=lambda x: int(x['Tax Year']))
-    transcript_income = most_recent_row['Total Income']
-    if isinstance(transcript_income, str):
-        transcript_income = float(str(transcript_income).replace("$", "").replace(",", ""))
+    most_recent_year = str(most_recent_row['Tax Year'])
+    wi_total_income = most_recent_row['Total Income']
+    if isinstance(wi_total_income, str):
+        wi_total_income = float(str(wi_total_income).replace("$", "").replace(",", ""))
+
+    # Find AT data for the most recent year
+    at_years_dict = {str(d.get('tax_year')): d for d in at_data if d.get('tax_year')}
+    at_for_year = at_years_dict.get(most_recent_year)
+    at_agi = None
+    if at_for_year:
+        at_agi = at_for_year.get('adjusted_gross_income')
+        if at_agi is not None and isinstance(at_agi, str):
+            try:
+                at_agi = float(at_agi.replace("$", "").replace(",", ""))
+            except Exception:
+                at_agi = None
+
+    # Decide which transcript value to use
+    if at_agi is not None and at_agi > 0:
+        transcript_income = at_agi
+        transcript_label = "Transcript AGI (from AT)"
+    else:
+        transcript_income = wi_total_income
+        transcript_label = "Transcript Total Income (from WI)"
 
     # Calculate percentage difference
     if transcript_income == 0:
@@ -2424,16 +2563,20 @@ def render_comparison_tab():
         percent_diff = ((client_annual_income - transcript_income) / transcript_income) * 100
 
     # Display results
-    st.subheader(f"Most Recent Year: {most_recent_row['Tax Year']}")
+    st.subheader(f"Most Recent Year: {most_recent_year}")
     col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("Client Annual Net (Self-Reported)", f"${client_annual_income:,.2f}")
     with col2:
-        st.metric("Transcript Total Income", f"${transcript_income:,.2f}")
+        st.metric(transcript_label, f"${transcript_income:,.2f}")
     with col3:
         st.metric("% Difference", f"{percent_diff:.2f}%")
+    # Optionally show both AT AGI and WI Total if both exist
+    if at_agi is not None and at_agi > 0:
+        st.caption(f"AT AGI: ${at_agi:,.2f}")
+    st.caption(f"WI Total Income: ${wi_total_income:,.2f}")
     st.markdown("---")
-    st.write("This comparison shows how close the client's self-reported income is to the IRS Wage & Income transcript for the most recent year.")
+    st.write("This comparison shows how close the client's self-reported income is to the IRS Wage & Income transcript or Account Transcript AGI for the most recent year.")
 
 def main():
     st.set_page_config(

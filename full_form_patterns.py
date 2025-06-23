@@ -54,9 +54,9 @@ form_patterns = {
         'category': 'SE',  # Self-Employment
         'fields': {
             # Income Fields
-            'Non-Employee Compensation': r'Nonemployee compensation[:\s]*\$([\d,.]+)',
+            'Non-Employee Compensation': r'Non[- ]?Employee[- ]?Compensation[:\s]*\$?([\d,.]+)',
             # Withholdings
-            'Federal Withholding': r'Federal income tax withheld[:\s]*\$([\d,.]+)'
+            'Federal Withholding': r'Federal[\s,]*income[\s,]*tax[\s,]*withheld[:\s]*\$?([\d,.]+)'
         },
         'identifiers': {
             'FIN': r"Payer's Federal Identification Number \(FIN\):\s*([\d\-]+)",
@@ -619,7 +619,7 @@ form_patterns.update({
         'category': 'Neither',  # Not SE or Non-SE
         'fields': {
             # Income Fields
-            'Gross Distributions': r'Gross distributions[:\s]*\$([\d,.]+)',
+            'Gross Distributions': r'Gross Distribution[s]?[:\s]*\$([\d,.]+)',  # Match singular or plural
             # Withholdings
             'Federal Withholding': None  # No withholdings
         },
