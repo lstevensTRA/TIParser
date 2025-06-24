@@ -273,49 +273,63 @@ def extract_header_info(text):
 def extract_form_data(text, form_patterns, tax_year, filing_status='Single', combined_income=0, output_buffer=None, filename=None):
     """Extract form data from text using patterns"""
     results = {}
-    
     def write_out(msg):
-        """Write to both logger and output buffer if provided"""
         logger.info(msg)
         if output_buffer:
             output_buffer.write(msg + "\n")
-    
     write_out("Starting form pattern matching")
-    
-    # Track if any form-like text is found but not matched
     form_like_sections = []
-    # Only match 'Form XXXX' at the start of a line (optionally with whitespace), not in the middle of instructions
     for match in re.finditer(r'(^|\n)\s*Form [A-Z0-9\-]+', text, re.IGNORECASE):
-        # Get the actual matched string (strip leading newline/whitespace)
         form_str = match.group(0).strip()
-        # Get the line containing the match
         line_start = text.rfind('\n', 0, match.start()) + 1
         line_end = text.find('\n', match.end())
         if line_end == -1:
             line_end = len(text)
         line = text[line_start:line_end].strip()
-        # Ignore if the line contains 'Check Box', 'Applicable', 'Transactions that do not flow', or 'Indicator'
         if re.search(r'check box|applicable|transactions that do not flow|indicator', line, re.IGNORECASE):
             continue
         form_like_sections.append((form_str, match.start(), match.end()))
-
-    # Process each form type
     for form_name, pattern_info in form_patterns.items():
         write_out(f"Processing form: {form_name}")
         matches = list(re.finditer(pattern_info['pattern'], text, re.MULTILINE))
-        
         if not matches:
             write_out(f"Form {form_name}: No pattern match found")
             continue
-            
         for idx, match in enumerate(matches):
             start = match.start()
             end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
             form_text = text[start:end]
-            
             # Extract unique identifiers
             unique_id = None
             unique_label = None
+            payer_blurb = None
+            # Improved: Only grab the FIN line and next 1-3 lines (payer name/address), stop at Recipient: or blank
+            fin_line_idx = None
+            lines = form_text.splitlines()
+            for i, line in enumerate(lines):
+                if "Payer's Federal Identification Number (FIN):" in line:
+                    fin_line_idx = i
+                    break
+            if fin_line_idx is not None:
+                blurb_lines = [lines[fin_line_idx]]
+                for j in range(fin_line_idx + 1, min(fin_line_idx + 4, len(lines))):
+                    next_line = lines[j].strip()
+                    if not next_line or next_line.startswith('Recipient:'):
+                        break
+                    blurb_lines.append(next_line)
+                payer_blurb = '\n'.join(blurb_lines).strip()
+            if not payer_blurb:
+                # Fallback: try to grab lines after 'Payer:' up to 3 lines
+                for i, line in enumerate(lines):
+                    if 'Payer:' in line:
+                        blurb_lines = [line.strip()]
+                        for j in range(i + 1, min(i + 4, len(lines))):
+                            next_line = lines[j].strip()
+                            if not next_line or next_line.startswith('Recipient:'):
+                                break
+                            blurb_lines.append(next_line)
+                        payer_blurb = '\n'.join(blurb_lines).strip()
+                        break
             if form_name == 'W-2':
                 ein_match = re.search(r'Employer Identification Number \(EIN\):\s*([\d\-]+)', form_text)
                 unique_id = ein_match.group(1) if ein_match else 'UNKNOWN'
@@ -329,8 +343,6 @@ def extract_form_data(text, form_patterns, tax_year, filing_status='Single', com
             elif form_name.startswith('1099'):
                 payer_match = re.search(r'Payer:\s*([A-Z0-9 &.,\-]+)', form_text)
                 unique_label = payer_match.group(1).strip() if payer_match else None
-            
-            # Format label string
             if form_name == 'W-2':
                 label_str = f" (EIN: {unique_id}, Employer: {unique_label})"
             elif form_name == '1099-INT':
@@ -339,17 +351,13 @@ def extract_form_data(text, form_patterns, tax_year, filing_status='Single', com
                 label_str = f", Payer: {unique_label}"
             else:
                 label_str = ""
-            
             write_out(f"Form {form_name} #{idx+1}{label_str}:")
             write_out("Pattern matched successfully")
             write_out(f"Using tax year {tax_year}")
-            
-            # Extract fields
             fields_data = {}
             write_out("Starting field extraction")
             for field_name, regex in pattern_info['fields'].items():
                 if regex:
-                    # For fields that may have multiple matches (like TY Payments), collect all
                     if field_name == 'TY Payments':
                         all_ty = re.findall(regex, form_text, re.IGNORECASE)
                         if all_ty:
@@ -369,13 +377,10 @@ def extract_form_data(text, form_patterns, tax_year, filing_status='Single', com
                             write_out(f"Field {field_name} - No match found (Regex: {regex})")
                             write_out(f"Raw snippet: {form_text[:200]}...")
             write_out(f"All extracted fields for {form_name}: {fields_data}")
-            
             if not fields_data:
                 write_out(f"Form {form_name} matched but no fields were captured. Fields attempted: {list(pattern_info['fields'].keys())}")
                 write_out(f"Raw form text snippet: {form_text[:300]}...")
                 continue
-            
-            # Calculate income and withholding using the form's calculation rules
             calc = pattern_info['calculation']
             try:
                 if 'filing_status' in calc['Income'].__code__.co_varnames:
@@ -394,13 +399,9 @@ def extract_form_data(text, form_patterns, tax_year, filing_status='Single', com
                 withholding = 0
                 write_out(f"ERROR: Withholding calculation for {form_name} failed: {e}")
             category = pattern_info.get('category', 'Neither')
-            
             write_out(f"Calculated values - Income: {income}, Withholding: {withholding}, Category: {category}")
-            
-            # Store results
             if tax_year not in results:
                 results[tax_year] = []
-            
             results[tax_year].append({
                 'Form': form_name,
                 'UniqueID': unique_id if unique_id else None,
@@ -408,9 +409,9 @@ def extract_form_data(text, form_patterns, tax_year, filing_status='Single', com
                 'Income': income,
                 'Withholding': withholding,
                 'Category': category,
-                'Fields': fields_data
+                'Fields': fields_data,
+                'PayerBlurb': payer_blurb
             })
-    # After all pattern matching, log any form-like text that was not matched by any pattern
     matched_spans = []
     for form_name, pattern_info in form_patterns.items():
         for m in re.finditer(pattern_info['pattern'], text, re.MULTILINE):
@@ -794,27 +795,63 @@ def render_wi_parser():
     with summary_tab:
         st.subheader("Income Summary")
         if st.session_state['wi_summary']:
+            # Add toggle for combined/separated view
+            summary_view = st.radio(
+                "Show:",
+                ["Combined", "Separated by Owner"],
+                horizontal=True,
+                key="wi_summary_view"
+            )
             df = pd.DataFrame(st.session_state['wi_summary'])
             # Calculate Estimated AGI
             df['Estimated AGI'] = df['Total Income'] - (df['SE Income'] * 0.0765)
             df['Estimated AGI'] = df['Estimated AGI'].round(2)
-            # Format currency columns for display only
-            display_df = df.copy()
-            currency_cols = ['SE Income', 'SE Withholding', 'Non-SE Income', 'Non-SE Withholding', 
-                           'Other Income', 'Other Withholding', 'Total Income', 'Estimated AGI', 'Total Withholding']
-            for col in currency_cols:
-                display_df[col] = display_df[col].apply(lambda x: f"${x:,.2f}")
-            # Reorder columns to put Estimated AGI after Total Income and before Total Withholding
-            cols = list(display_df.columns)
-            if 'Estimated AGI' in cols and 'Total Income' in cols and 'Total Withholding' in cols:
-                ti_idx = cols.index('Total Income')
-                tw_idx = cols.index('Total Withholding')
-                # Remove Estimated AGI and re-insert
-                cols.remove('Estimated AGI')
-                cols.insert(ti_idx + 1, 'Estimated AGI')
-                display_df = display_df[cols]
-            # Display summary table
-            st.table(display_df)
+            # Prepare owner breakdowns for each year
+            owner_rows = []
+            for _, row in df.iterrows():
+                year = row['Tax Year']
+                year_forms = st.session_state['wi_data'].get(int(year), [])
+                year_data = {int(year): year_forms}
+                totals = TPSParser.aggregate_income_by_owner(year_data)
+                year_totals = totals.get(int(year), {})
+                owner_rows.append({
+                    'Tax Year': year,
+                    'Taxpayer Income': year_totals.get('taxpayer', {}).get('income', 0),
+                    'Spouse Income': year_totals.get('spouse', {}).get('income', 0),
+                    'Joint Income': year_totals.get('joint', {}).get('income', 0),
+                    'Combined Income': year_totals.get('combined', {}).get('income', 0),
+                    'Taxpayer Withholding': year_totals.get('taxpayer', {}).get('withholding', 0),
+                    'Spouse Withholding': year_totals.get('spouse', {}).get('withholding', 0),
+                    'Joint Withholding': year_totals.get('joint', {}).get('withholding', 0),
+                    'Combined Withholding': year_totals.get('combined', {}).get('withholding', 0),
+                })
+            owner_df = pd.DataFrame(owner_rows)
+            # Format currency columns
+            for col in ['Taxpayer Income', 'Spouse Income', 'Joint Income', 'Combined Income',
+                        'Taxpayer Withholding', 'Spouse Withholding', 'Joint Withholding', 'Combined Withholding']:
+                owner_df[col] = owner_df[col].apply(lambda x: f"${x:,.2f}")
+            if summary_view == "Separated by Owner":
+                st.table(owner_df)
+            else:
+                # Combined view: show only combined columns, plus original summary columns
+                combined_df = owner_df[['Tax Year', 'Combined Income', 'Combined Withholding']].copy()
+                # Merge with original summary for other fields
+                display_df = df.copy()
+                currency_cols = ['SE Income', 'SE Withholding', 'Non-SE Income', 'Non-SE Withholding', 
+                               'Other Income', 'Other Withholding', 'Total Income', 'Estimated AGI', 'Total Withholding']
+                for col in currency_cols:
+                    display_df[col] = display_df[col].apply(lambda x: f"${x:,.2f}")
+                # Reorder columns to put Estimated AGI after Total Income and before Total Withholding
+                cols = list(display_df.columns)
+                if 'Estimated AGI' in cols and 'Total Income' in cols and 'Total Withholding' in cols:
+                    ti_idx = cols.index('Total Income')
+                    tw_idx = cols.index('Total Withholding')
+                    cols.remove('Estimated AGI')
+                    cols.insert(ti_idx + 1, 'Estimated AGI')
+                    display_df = display_df[cols]
+                # Merge on Tax Year
+                merged = pd.merge(combined_df, display_df, on='Tax Year', how='left')
+                st.table(merged)
             
             # Add owner-based summary
             st.markdown("---")
@@ -910,6 +947,10 @@ def render_wi_parser():
                                     form_label += f" - {label}"
                                 
                                 st.markdown(f"• {form_label} ({category})")
+                                # Show only the payer name in a clean style
+                                if label and label != "UNKNOWN":
+                                    st.markdown(f"<span style='color:#444;font-size:1.05em'><b>Payer:</b> {label}</span>", unsafe_allow_html=True)
+                                # Remove the full PayerBlurb display for cleanest look
                                 fcol1, fcol2, fcol3 = st.columns(3)
                                 with fcol1:
                                     st.write(f"Income: ${income:,.2f}")
@@ -1541,60 +1582,74 @@ def format_year(year):
     return str(year)
 
 def extract_at_transactions(text):
-    """Extract transaction data from AT transcript text (robust to all formats)"""
-    # Find the transactions section (from TRANSACTIONS to next ALL CAPS section or end)
-    # Handles both 'CODE\nEXPLANATION...' and 'CODEEXPLANATION...' squished formats
-    transactions_match = re.search(r'TRANSACTIONS[\s\S]*?(?:\n([A-Z ]{5,}):|\Z)', text)
-    if not transactions_match:
-        # Fallback: try to get everything after TRANSACTIONS
-        transactions_match = re.search(r'TRANSACTIONS[\s\S]*', text)
-        if not transactions_match:
-            return []
-        transactions_text = transactions_match.group(0)
-    else:
-        transactions_text = text[transactions_match.start():transactions_match.end()]
-
-    # Remove the TRANSACTIONS header and any column headers (robust to squished or spaced)
-    transactions_text = re.sub(r'TRANSACTIONS.*?\nCODE\s*EXPLANATION.*?\n', '', transactions_text, flags=re.DOTALL|re.IGNORECASE)
-    transactions_text = re.sub(r'TRANSACTIONS.*?\n', '', transactions_text, flags=re.DOTALL|re.IGNORECASE)
-    transactions_text = re.sub(r'CODE\s*EXPLANATION.*?\n', '', transactions_text, flags=re.DOTALL|re.IGNORECASE)
-    transactions_text = re.sub(r'CODEEXPLANATION.*?\n', '', transactions_text, flags=re.DOTALL|re.IGNORECASE)
-
-    # Parse each transaction line (robust to squished columns)
-    # Try both spaced and squished patterns
-    transaction_patterns = [
-        r'(?m)\b(\d{3})\b\s+(.+?)\s{2,}(\d{2}-\d{2}-\d{4})\s+\$?([-,\d\.]+|-)',  # spaced
-        r'(?m)\b(\d{3})\b([^\d]{5,}?)(\d{2}-\d{2}-\d{4})\$?([-,\d\.]+|-)'  # squished
-    ]
+    """Extract transaction data from AT transcript text (robust to compact and spaced formats)"""
+    import re
+    from datetime import datetime
+    # Find the transactions section
+    idx = text.find("TRANSACTIONS")
+    if idx < 0:
+        return []
+    buf = text[idx:]
     transactions = []
-    for pattern in transaction_patterns:
-        for match in re.finditer(pattern, transactions_text):
-            code = match.group(1)
-            description = match.group(2).strip()
-            date = match.group(3)
-            amount_str = match.group(4)
+    # Regex for compact format (single line, no spaces between columns)
+    compact_regex = re.compile(r'^(\d{3}|n/a)([^\d\n]+?)(\d{8})\s+(\d{2}-\d{2}-\d{4})\s+(-?\$?[\d,]+\.\d{2})', re.MULTILINE)
+    # Regex for spaced/multiline format (columns with headers)
+    spaced_regex = re.compile(r'^(\d{3}|n/a)\s*([^\n]+)\n(?:[\w\s]*)?(\d{2}-\d{2}-\d{4})\s*\n\$?([\d,\.-]+)', re.MULTILINE)
+    # Try compact format first
+    for match in compact_regex.finditer(buf):
+        code, desc, cyc, post, amt = match.groups()
+        # Try to parse cycle date
+        try:
+            cycle_date = f"{cyc[:4]}-{cyc[4:6]}-{cyc[6:]}"
+        except Exception:
+            cycle_date = ''
+        # Parse post date
+        try:
+            post_date = datetime.strptime(post, "%m-%d-%Y").date().isoformat()
+        except Exception:
+            post_date = post
+        # Parse amount
+        try:
+            amount = float(amt.replace('$','').replace(',',''))
+        except Exception:
+            amount = 0.0
+        transactions.append({
+            "code": code.strip(),
+            "meaning": desc.strip(),
+            "cycle_date": cycle_date,
+            "date": post_date,
+            "amount": amount
+        })
+    # If no compact matches, try spaced format
+    if not transactions:
+        # Look for special lines like 'No tax return filed'
+        for line in buf.splitlines():
+            if re.search(r'no tax return filed', line, re.IGNORECASE):
+                transactions.append({
+                    'code': 'n/a',
+                    'meaning': 'No tax return filed',
+                    'cycle_date': '',
+                    'date': '',
+                    'amount': 0.0
+                })
+        for match in spaced_regex.finditer(buf):
+            code, desc, post, amt = match.groups()
+            # Parse post date
             try:
-                if amount_str == '-' or not amount_str.strip():
-                    amount = 0.0
-                else:
-                    amount = float(amount_str.replace(',', ''))
-            except ValueError:
-                logger.warning(f"Could not parse amount '{amount_str}' for transaction code {code}")
+                post_date = datetime.strptime(post, "%m-%d-%Y").date().isoformat()
+            except Exception:
+                post_date = post
+            # Parse amount
+            try:
+                amount = float(amt.replace('$','').replace(',',''))
+            except Exception:
                 amount = 0.0
-            interpreted = interpret_transaction(code, description, date, amount)
-            if interpreted:
-                transactions.append(interpreted)
-        if transactions:
-            break  # Use the first pattern that matches
-    # Also handle 'n/aNo tax return filed' and similar lines
-    for line in transactions_text.splitlines():
-        if re.search(r'no tax return filed', line, re.IGNORECASE):
             transactions.append({
-                'code': 'n/a',
-                'meaning': 'No tax return filed',
-                'description': line.strip(),
-                'date': '',
-                'amount': 0.0
+                "code": code.strip(),
+                "meaning": desc.strip(),
+                "cycle_date": '',
+                "date": post_date,
+                "amount": amount
             })
     return transactions
 
@@ -1679,53 +1734,44 @@ def extract_at_data(text):
 
 def process_at_documents(case_id, at_files):
     """Process all AT documents once and store results"""
+    from utils.tp_s_parser import TPSParser
     all_data = []
-    
     # Set up logging
     log_buffer = io.StringIO()
     log_handler = logging.StreamHandler(log_buffer)
     log_handler.setLevel(logging.INFO)
     logger.addHandler(log_handler)
-    
     with st.spinner("Processing Account Transcript documents..."):
         progress_bar = st.progress(0)
         total_files = len(at_files)
-        
         for idx, at_file in enumerate(at_files):
             logger.info(f"\n{'='*50}")
             logger.info(f"Processing file: {at_file['FileName']}")
             logger.info(f"{'='*50}\n")
-            
             pdf_bytes = download_file(at_file["CaseDocumentID"], case_id)
             if pdf_bytes:
                 text = extract_text_from_pdf(pdf_bytes)
                 if text:
-                    # Log the complete raw text
                     logger.info("Complete extracted text from PDF:")
                     logger.info("-" * 50)
                     logger.info(text)
                     logger.info("-" * 50)
-                    
                     data = extract_at_data(text)
                     if data:
+                        # Extract owner from filename
+                        owner = TPSParser.extract_owner_from_filename(at_file['FileName'])
+                        data['owner'] = owner or 'Unknown'
+                        data['source_file'] = at_file['FileName']
                         all_data.append(data)
-            
-            # Update progress bar
             progress_bar.progress((idx + 1) / total_files)
-    
-    # Store results in session state
     st.session_state['at_data'] = all_data
     st.session_state['at_log'] = log_buffer.getvalue()
-    
-    # Process alerts
     all_alerts = []
     for year_data in all_data:
         if 'transactions' in year_data:
             alerts = get_transaction_alerts(year_data['transactions'])
             all_alerts.extend(alerts)
     st.session_state['at_alerts'] = all_alerts
-    
-    # Clean up logging
     logger.removeHandler(log_handler)
     log_buffer.close()
 
@@ -1776,6 +1822,7 @@ def render_at_parser():
                     filed = False
             row = {
                 'Tax Year': format_year(tax_year),
+                'Owner': data.get('owner', 'Unknown'),
                 'Return Filed': 'Yes' if filed else 'No',
                 'Filing Status': data.get('filing_status', 'Unknown'),
                 'Current Balance': data.get('account_balance', 0),
