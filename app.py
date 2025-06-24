@@ -2476,8 +2476,8 @@ def render_comprehensive_analysis():
     analysis = create_tax_summary(wi_data, at_data)
     
     # Set up Streamlit tabs
-    overview_tab, detailed_tab, recommendations_tab, json_tab = st.tabs([
-        "Overview", "Detailed Analysis", "Recommendations", "JSON"
+    overview_tab, detailed_tab, rec_services_tab, json_tab = st.tabs([
+        "Overview", "Detailed Analysis", "Recommendations & Services", "JSON"
     ])
     
     with overview_tab:
@@ -2487,25 +2487,50 @@ def render_comprehensive_analysis():
         summary_data = []
         for year, year_data in analysis.items():
             analysis_info = year_data['analysis']
+            # Get current balance from AT data if available
+            current_balance = 0
+            if year_data['at_data'] and isinstance(year_data['at_data'], dict):
+                current_balance = year_data['at_data'].get('account_balance', 0)
+            # Actual Income (W&I)
+            actual_income = year_data['wi_data']['total_income']
+            # Reported Income (AT AGI or Not Reported)
+            if analysis_info['return_status'] == 'Filed':
+                reported_income = year_data['at_data'].get('adjusted_gross_income', 0) if year_data['at_data'] else 0
+            else:
+                reported_income = 'Not Reported'
+            # Tax Owed: filed = current balance, unfiled = SFR liability (always a number)
+            if analysis_info['return_status'] == 'Filed':
+                tax_owed = float(current_balance)
+            else:
+                tax_owed = float(analysis_info['unfiled_liability'])
+            # Income Discrepancy: only if amendment is needed
+            if analysis_info['needs_amendment']:
+                income_discrepancy = actual_income - (reported_income if isinstance(reported_income, (int, float)) else 0)
+            else:
+                income_discrepancy = ''
             summary_data.append({
                 'Tax Year': year,
                 'Return Status': analysis_info['return_status'],
-                'WI Total Income': year_data['wi_data']['total_income'],
-                'AT AGI': year_data['at_data'].get('adjusted_gross_income', 0) if year_data['at_data'] else 0,
-                'Income Discrepancy': analysis_info['income_discrepancy'],
+                'Actual Income (W&I Transcript)': actual_income,
+                'Reported Income (Filed Return)': reported_income,
+                'Income Discrepancy': income_discrepancy,
+                'Tax Owed': tax_owed,
                 'Needs Amendment': 'Yes' if analysis_info['needs_amendment'] else 'No',
-                'Unfiled Liability': analysis_info['unfiled_liability'],
                 'Priority Level': analysis_info['priority_level']
             })
         
         if summary_data:
             df = pd.DataFrame(summary_data)
-            
             # Format currency columns
-            currency_cols = ['WI Total Income', 'AT AGI', 'Income Discrepancy', 'Unfiled Liability']
+            currency_cols = ['Actual Income (W&I Transcript)', 'Tax Owed', 'Income Discrepancy']
             for col in currency_cols:
-                df[col] = df[col].apply(lambda x: f"${x:,.2f}")
-            
+                df[col] = df[col].apply(lambda x: f"${x:,.2f}" if isinstance(x, (int, float)) and x != '' else ('' if x == '' else x))
+            # Format Reported Income as currency if not 'Not Reported'
+            def format_reported_income(val):
+                if isinstance(val, (int, float)):
+                    return f"${val:,.2f}"
+                return val
+            df['Reported Income (Filed Return)'] = df['Reported Income (Filed Return)'].apply(format_reported_income)
             # Add priority color coding
             def color_priority(val):
                 if val == 1:
@@ -2514,27 +2539,20 @@ def render_comprehensive_analysis():
                     return 'background-color: #ffebcc'  # Orange for high
                 else:
                     return 'background-color: #e6ffe6'  # Green for medium
-            
             styled_df = df.style.applymap(color_priority, subset=['Priority Level'])
             st.dataframe(styled_df, use_container_width=True)
-            
-            # Summary statistics
+            # Summary metrics (totals)
+            total_tax_owed = sum(row['Tax Owed'] for row in summary_data)
+            total_current_balance = sum(row['Tax Owed'] for row in summary_data if row['Return Status'] == 'Filed')
+            total_projected_sfr = sum(row['Tax Owed'] for row in summary_data if row['Return Status'] == 'Not Filed')
             st.markdown("---")
-            col1, col2, col3, col4 = st.columns(4)
-            
-            total_discrepancy = sum(abs(row['Income Discrepancy']) for row in summary_data)
-            total_unfiled_liability = sum(row['Unfiled Liability'] for row in summary_data)
-            urgent_count = sum(1 for row in summary_data if row['Priority Level'] == 1)
-            filed_count = sum(1 for row in summary_data if row['Return Status'] == 'Filed')
-            
+            col1, col2, col3 = st.columns(3)
             with col1:
-                st.metric("Total Income Discrepancy", f"${total_discrepancy:,.2f}")
+                st.metric("Total IRS Debt (All Years)", f"${total_tax_owed:,.2f}")
             with col2:
-                st.metric("Total Unfiled Liability", f"${total_unfiled_liability:,.2f}")
+                st.metric("Current IRS Balance (Filed Years)", f"${total_current_balance:,.2f}")
             with col3:
-                st.metric("Urgent Issues", urgent_count)
-            with col4:
-                st.metric("Returns Filed", f"{filed_count}/{len(summary_data)}")
+                st.metric("Projected SFR Liability (Unfiled Years)", f"${total_projected_sfr:,.2f}")
     
     with detailed_tab:
         st.subheader("Detailed Year-by-Year Analysis")
@@ -2645,18 +2663,49 @@ def render_comprehensive_analysis():
                     else:
                         st.success(f"Priority: MEDIUM ({priority})")
     
-    with recommendations_tab:
-        st.subheader("Actionable Recommendations")
-        
-        # Group by priority level
+    with rec_services_tab:
+        st.subheader('Recommended Services')
+        # --- Recommended Services Panel ---
+        recs = []
+        unfiled_years = [row['Tax Year'] for row in summary_data if row['Return Status'] == 'Not Filed']
+        if unfiled_years:
+            recs.append({
+                'icon': '📝',
+                'title': 'Tax Preparation & Filing',
+                'desc': f'File returns for unfiled years: {", ".join(map(str, unfiled_years))}',
+                'blurb': "Filing unfiled returns stops IRS substitute returns (SFRs), reduces penalties, and starts the CSED clock. The IRS can file for you using worst-case assumptions, often resulting in a much higher tax bill."
+            })
+        amend_years = [row['Tax Year'] for row in summary_data if row['Needs Amendment'] == 'Yes']
+        if amend_years:
+            recs.append({
+                'icon': '✏️',
+                'title': 'Tax Preparation & Amendment',
+                'desc': f'Amend returns for years: {", ".join(map(str, amend_years))}',
+                'blurb': "Amending corrects discrepancies between your return and IRS records, helps avoid audits, and reduces risk of accuracy penalties (up to 20% of underpayment) and interest."
+            })
+        balance_years = [row['Tax Year'] for row in summary_data if row['Tax Owed'] > 0 and row['Return Status'] == 'Filed']
+        if balance_years:
+            recs.append({
+                'icon': '💸',
+                'title': 'Payment Plan Setup',
+                'desc': f'Set up payment plans for years: {", ".join(map(str, balance_years))}',
+                'blurb': "A payment plan helps avoid IRS levies or liens, lets you pay over time, and may reduce additional penalties. The IRS charges setup fees and interest continues to accrue until paid in full."
+            })
+        if recs:
+            for rec in recs:
+                st.write(f"{rec['icon']} **{rec['title']}**: {rec['desc']}")
+                st.write(f"{rec['blurb']}")
+        else:
+            st.success('No urgent services required at this time!')
+        st.markdown('---')
+        st.subheader('Year-by-Year Actionable Recommendations')
+        # --- Year-by-year actionable recommendations (restored) ---
         urgent_issues = []
         high_priority = []
         medium_priority = []
-        
         for year, year_data in analysis.items():
             analysis_info = year_data['analysis']
             priority = analysis_info['priority_level']
-            
             issue = {
                 'year': year,
                 'return_status': analysis_info['return_status'],
@@ -2664,14 +2713,12 @@ def render_comprehensive_analysis():
                 'income_discrepancy': analysis_info['income_discrepancy'],
                 'unfiled_liability': analysis_info['unfiled_liability']
             }
-            
             if priority == 1:
                 urgent_issues.append(issue)
             elif priority == 2:
                 high_priority.append(issue)
             else:
                 medium_priority.append(issue)
-        
         # Display urgent issues
         if urgent_issues:
             st.error("🚨 URGENT ISSUES")
@@ -2679,7 +2726,6 @@ def render_comprehensive_analysis():
                 with st.expander(f"Tax Year {issue['year']} - URGENT", expanded=True):
                     for rec in issue['recommendations']:
                         st.write(f"• {rec}")
-        
         # Display high priority issues
         if high_priority:
             st.warning("⚠️ HIGH PRIORITY ISSUES")
@@ -2687,7 +2733,6 @@ def render_comprehensive_analysis():
                 with st.expander(f"Tax Year {issue['year']} - HIGH PRIORITY"):
                     for rec in issue['recommendations']:
                         st.write(f"• {rec}")
-        
         # Display medium priority issues
         if medium_priority:
             st.info("ℹ️ MEDIUM PRIORITY ISSUES")
@@ -2695,7 +2740,6 @@ def render_comprehensive_analysis():
                 with st.expander(f"Tax Year {issue['year']} - MEDIUM PRIORITY"):
                     for rec in issue['recommendations']:
                         st.write(f"• {rec}")
-        
         if not any([urgent_issues, high_priority, medium_priority]):
             st.success("✅ No significant issues detected")
     
