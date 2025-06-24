@@ -112,12 +112,13 @@ def display_client_profile(client_data: dict):
     st.divider()
     
     # Main Content Tabs
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "📊 Overview", 
         "💰 Financial Profile", 
         "🏛️ Tax Information",
         "👥 Case Management", 
-        "📋 Detailed Data"
+        "📋 Detailed Data",
+        "🔧 JSON Data"
     ])
     
     with tab1:
@@ -134,6 +135,9 @@ def display_client_profile(client_data: dict):
     
     with tab5:
         display_detailed_data_tab(client_data)
+    
+    with tab6:
+        display_json_data_tab(client_data)
 
 def display_client_header(client_data: dict):
     """Display header with key client information"""
@@ -411,6 +415,11 @@ def display_detailed_data_tab(client_data: dict):
     # Raw data viewer
     with st.expander("🔧 Raw API Data (For Debugging)"):
         st.json(client_data['raw_data'])
+
+def display_json_data_tab(client_data: dict):
+    """Display raw JSON data for advanced users"""
+    st.subheader("🔧 Raw JSON Data (For Debugging)")
+    st.json(client_data['raw_data'])
 
 # Integration function for main app
 def add_client_profile_to_main_app():

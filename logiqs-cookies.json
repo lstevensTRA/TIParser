@@ -1,0 +1,96 @@
+{
+  "timestamp": "2025-06-24T12:55:57.410255",
+  "url": "https://tps.logiqs.com",
+  "cookies": [
+    {
+      "name": "ASP.NET_SessionId",
+      "value": "tqlhxzlvgxdsfj2smzy3geog",
+      "domain": "tps.logiqs.com",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "IRSCookie",
+      "value": "87F752D1BCB6E5F642F39A4A0A8737826A2BA6873CAE314E0804D2A6FE41389876112C396068C0D52E6CFBDAE5E52B312D605CDCB9AFED6993C47E9C131BA219012C9A1374B99CD5800E90876E3CF88CA71DAD441F6460B77FE1F70218ED2B63",
+      "domain": "tps.logiqs.com",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "SessionDeviceID",
+      "value": "075037048071232033012205114037155173055183175130146211252138218115012198078015206240098183195020161162031248239045018205202047192148248040221034",
+      "domain": "tps.logiqs.com",
+      "path": "/",
+      "expires": 1750967748.791779,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "__cf_bm",
+      "value": "VlofRUfwwMzwe6xNgPmaxwn0OyTkFj5N0O51hqDtqwE-1750794950-1.0.1.1-EmJDO2Qn5G9RpEyaVmMnRwh0.Qa7BHcO6D.C6gMgj4nSWdUa0Gu9xhLyXd5q9tAukILKmMTLm05Z.HeF9RZof67ml3kbfREtenfMJaLzYLU",
+      "domain": ".support.irslogics.com",
+      "path": "/",
+      "expires": 1750796750.772533,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "_cfuvid",
+      "value": "LcWnXygm4AQw605lowtG1XK_k4fip_rqPQFAxsGHtdc-1750794950744-0.0.1.1-604800000",
+      "domain": ".support.irslogics.com",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "YSC",
+      "value": "w3MFHDIIZ9I",
+      "domain": ".youtube.com",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "__Secure-ROLLOUT_TOKEN",
+      "value": "CI-qy8GN1M3MhAEQ2qnzuOuKjgMY2qnzuOuKjgM%3D",
+      "domain": ".youtube.com",
+      "path": "/",
+      "expires": 1766346950.774056,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "VISITOR_INFO1_LIVE",
+      "value": "bRyRlsyLUXs",
+      "domain": ".youtube.com",
+      "path": "/",
+      "expires": 1766346950.774087,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "VISITOR_PRIVACY_METADATA",
+      "value": "CgJVUxIEGgAgQA%3D%3D",
+      "domain": ".youtube.com",
+      "path": "/",
+      "expires": 1766346950.774099,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    }
+  ]
+}

@@ -17,6 +17,10 @@ from utils.api_client import render_client_profile_tab
 from utils.tp_s_parser import TPSParser
 from collections import defaultdict
 from io import BytesIO
+import time
+from playwright.sync_api import sync_playwright
+import sys
+import subprocess
 
 
 # Configure logging
@@ -33,47 +37,66 @@ from full_form_patterns import form_patterns  # make sure this file exists!
 COOKIE_FILE = "tps_cookies.json"
 
 def load_cookies_from_file():
-    """Load cookies from the tps_cookies.json file"""
-    if not os.path.exists(COOKIE_FILE):
-        logger.warning("Cookie file not found")
-        return None, None
+    """Load cookies from the logiqs-cookies.json file (matching JS format)"""
+    cookie_files = ["logiqs-cookies.json", "tps_cookies.json"]  # Try both formats
     
-    try:
-        with open(COOKIE_FILE, 'r') as f:
-            cookie_data = json.load(f)
+    for cookie_file in cookie_files:
+        if not os.path.exists(cookie_file):
+            continue
             
-        # If we have cookies and user agent, return them regardless of timestamp
-        if cookie_data.get('cookies') and cookie_data.get('user_agent'):
-            # Try to check timestamp if available, but don't fail if it's not
-            try:
-                timestamp = datetime.fromisoformat(cookie_data['timestamp'])
-                age_hours = (datetime.now() - timestamp).total_seconds() / 3600
-                if age_hours > 12:
-                    logger.warning("Cookies are older than 12 hours but will try to use them")
-            except (KeyError, ValueError):
-                logger.warning("No timestamp found in cookie file but will try to use cookies")
+        try:
+            with open(cookie_file, 'r') as f:
+                cookie_data = json.load(f)
+            
+            # Handle new logiqs-cookies.json format (matching JS)
+            if cookie_file == "logiqs-cookies.json" and 'cookies' in cookie_data:
+                cookies = cookie_data['cookies']
+                if cookies:
+                    # Convert to string format for compatibility
+                    cookie_str = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
+                    user_agent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                    
+                    # Check timestamp if available
+                    try:
+                        timestamp = datetime.fromisoformat(cookie_data['timestamp'])
+                        age_hours = (datetime.now() - timestamp).total_seconds() / 3600
+                        if age_hours > 12:
+                            logger.warning(f"Cookies are {age_hours:.1f} hours old but will try to use them")
+                            return cookie_str, user_agent, f"Cookies are {age_hours:.1f} hours old"
+                    except (KeyError, ValueError):
+                        logger.warning("No timestamp found in cookie file but will try to use cookies")
+                    
+                    return cookie_str, user_agent, "Valid cookies found"
+            
+            # Handle old tps_cookies.json format
+            elif cookie_file == "tps_cookies.json" and cookie_data.get('cookies') and cookie_data.get('user_agent'):
+                # Try to check timestamp if available, but don't fail if it's not
+                try:
+                    timestamp = datetime.fromisoformat(cookie_data['timestamp'])
+                    age_hours = (datetime.now() - timestamp).total_seconds() / 3600
+                    if age_hours > 12:
+                        logger.warning("Cookies are older than 12 hours but will try to use them")
+                        return cookie_data['cookies'], cookie_data['user_agent'], f"Cookies are {age_hours:.1f} hours old"
+                except (KeyError, ValueError):
+                    logger.warning("No timestamp found in cookie file but will try to use cookies")
+                    
+                return cookie_data['cookies'], cookie_data['user_agent'], "Valid cookies found"
                 
-            return cookie_data['cookies'], cookie_data['user_agent']
-            
-        logger.warning("Cookie file exists but missing required data")
-        return None, None
-        
-    except Exception as e:
-        logger.warning(f"Error reading cookie file: {str(e)}")
-        return None, None
+        except Exception as e:
+            logger.warning(f"Error reading {cookie_file}: {str(e)}")
+            continue
+    
+    logger.warning("No valid cookie files found")
+    return None, None, "No valid cookie files found"
 
 def get_wi_files(case_id: str) -> list:
     """
     Get list of WI files associated with a case.
     """
-    cookies, user_agent = load_cookies_from_file()
+    cookies, user_agent, message = load_cookies_from_file()
     if not cookies:
         st.error("Authentication required. Please ensure cookies are valid.")
-        st.info("Please run the cookie extraction script to refresh your cookies.")
-        st.info("1. Run: python3 extract_tps_cookies.py")
-        st.info("2. Log in to the TPS site in the opened browser window.")
-        st.info("3. After logging in, press Enter in the terminal window.")
-        st.info("4. Refresh this page.")
+        st.info("Please use the '🔐 TPS Login' tab in the sidebar to authenticate.")
         return []
 
     cookie_header = cookies if isinstance(cookies, str) else ""
@@ -98,11 +121,7 @@ def get_wi_files(case_id: str) -> list:
             location = response.headers.get("Location", "").lower()
             if "login" in location or "default.aspx" in location:
                 st.error("Authentication required. Please ensure cookies are valid.")
-                st.info("Please run the cookie extraction script to refresh your cookies.")
-                st.info("1. Run: python3 extract_tps_cookies.py")
-                st.info("2. Log in to the TPS site in the opened browser window.")
-                st.info("3. After logging in, press Enter in the terminal window.")
-                st.info("4. Refresh this page.")
+                st.info("Please use the '🔐 TPS Login' tab in the sidebar to authenticate.")
                 return []
 
         response.raise_for_status()
@@ -146,7 +165,7 @@ def download_file(case_doc_id: str, case_id: str) -> bytes:
     """
     Download a file using the case document ID and case ID.
     """
-    cookies, user_agent = load_cookies_from_file()
+    cookies, user_agent, message = load_cookies_from_file()
     if not cookies:
         st.error("Authentication required. Please ensure cookies are valid.")
         return None
@@ -543,17 +562,18 @@ def render_home():
     st.title("IRS Transcript Parser")
     
     # Check cookie status
-    cookies, user_agent = load_cookies_from_file()
+    cookies, user_agent, message = load_cookies_from_file()
     if not cookies:
-        st.warning("⚠️ No valid cookies found. Please run the cookie extraction script to refresh your cookies.")
-        st.info("Steps to refresh cookies:")
+        st.warning("⚠️ No valid cookies found. Please use the '🔐 TPS Login' tab in the sidebar to authenticate.")
+        st.info("Steps to authenticate:")
         st.markdown("""
-        1. Run: `python3 extract_tps_cookies.py`
-        2. Log in to the TPS site in the opened browser window.
-        3. After logging in, press Enter in the terminal window.
-        4. Refresh this page.
+        1. Use the '🔐 TPS Login' tab in the sidebar to authenticate.
+        2. After logging in, press Enter in the terminal window.
+        3. Refresh this page.
         """)
         st.info("Note: If you've manually added cookies to tps_cookies.json, you can try using the parsers, but you may need to refresh cookies if authentication fails.")
+    else:
+        st.success(f"✅ Authentication status: {message}")
     
     # Case ID input
     case_id = st.text_input(
@@ -1503,14 +1523,10 @@ def get_at_files(case_id: str) -> list:
     """
     Get list of AT (Account Transcript) files associated with a case.
     """
-    cookies, user_agent = load_cookies_from_file()
+    cookies, user_agent, message = load_cookies_from_file()
     if not cookies:
         st.error("Authentication required. Please ensure cookies are valid.")
-        st.info("Please run the cookie extraction script to refresh your cookies.")
-        st.info("1. Run: python3 extract_tps_cookies.py")
-        st.info("2. Log in to the TPS site in the opened browser window.")
-        st.info("3. After logging in, press Enter in the terminal window.")
-        st.info("4. Refresh this page.")
+        st.info("Please use the '🔐 TPS Login' tab in the sidebar to authenticate.")
         return []
 
     cookie_header = cookies if isinstance(cookies, str) else ""
@@ -1535,11 +1551,7 @@ def get_at_files(case_id: str) -> list:
             location = response.headers.get("Location", "").lower()
             if "login" in location or "default.aspx" in location:
                 st.error("Authentication required. Please ensure cookies are valid.")
-                st.info("Please run the cookie extraction script to refresh your cookies.")
-                st.info("1. Run: python3 extract_tps_cookies.py")
-                st.info("2. Log in to the TPS site in the opened browser window.")
-                st.info("3. After logging in, press Enter in the terminal window.")
-                st.info("4. Refresh this page.")
+                st.info("Please use the '🔐 TPS Login' tab in the sidebar to authenticate.")
                 return []
 
         response.raise_for_status()
@@ -1889,7 +1901,7 @@ def get_roa_files(case_id: str) -> list:
     """
     Get list of ROA (Record of Account) files associated with a case.
     """
-    cookies, user_agent = load_cookies_from_file()
+    cookies, user_agent, message = load_cookies_from_file()
     if not cookies:
         st.error("Authentication required. Please ensure cookies are valid.")
         return []
@@ -1955,7 +1967,7 @@ def get_trt_files(case_id: str) -> list:
     """
     Get list of TRT (Tax Return Transcript) files associated with a case.
     """
-    cookies, user_agent = load_cookies_from_file()
+    cookies, user_agent, message = load_cookies_from_file()
     if not cookies:
         st.error("Authentication required. Please ensure cookies are valid.")
         return []
@@ -2203,13 +2215,12 @@ def render_settings():
     
     # Cookie Status
     st.subheader("Authentication Status")
-    cookies, user_agent = load_cookies_from_file()
+    cookies, user_agent, message = load_cookies_from_file()
     if cookies:
         st.success("✅ Valid cookies found")
     else:
         st.error("❌ No valid cookies found")
-        st.info("To refresh cookies:")
-        st.code("python3 extract_tps_cookies.py")
+        st.info("Please use the '🔐 TPS Login' tab in the sidebar to authenticate.")
     
     # About Section
     st.subheader("About")
@@ -2750,6 +2761,7 @@ def render_comprehensive_analysis():
 def render_comparison_tab():
     st.title("Income Comparison: Client vs Wage & Income Transcript")
     st.markdown("---")
+    
     # Get client profile data (support both keys)
     client_data = st.session_state.get('client_data') or st.session_state.get('client_profile_data')
     wi_summary = st.session_state.get('wi_summary')
@@ -2808,21 +2820,360 @@ def render_comparison_tab():
     else:
         percent_diff = ((client_annual_income - transcript_income) / transcript_income) * 100
 
-    # Display results
-    st.subheader(f"Most Recent Year: {most_recent_year}")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Client Annual Net (Self-Reported)", f"${client_annual_income:,.2f}")
-    with col2:
-        st.metric(transcript_label, f"${transcript_income:,.2f}")
-    with col3:
-        st.metric("% Difference", f"{percent_diff:.2f}%")
-    # Optionally show both AT AGI and WI Total if both exist
-    if at_agi is not None and at_agi > 0:
-        st.caption(f"AT AGI: ${at_agi:,.2f}")
-    st.caption(f"WI Total Income: ${wi_total_income:,.2f}")
+    # Create tabs for the comparison
+    comparison_tab, json_tab = st.tabs(["📊 Comparison", "🔧 JSON Data"])
+    
+    with comparison_tab:
+        # Display results
+        st.subheader(f"Most Recent Year: {most_recent_year}")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Client Annual Net (Self-Reported)", f"${client_annual_income:,.2f}")
+        with col2:
+            st.metric(transcript_label, f"${transcript_income:,.2f}")
+        with col3:
+            st.metric("% Difference", f"{percent_diff:.2f}%")
+        # Optionally show both AT AGI and WI Total if both exist
+        if at_agi is not None and at_agi > 0:
+            st.caption(f"AT AGI: ${at_agi:,.2f}")
+        st.caption(f"WI Total Income: ${wi_total_income:,.2f}")
+        st.markdown("---")
+        st.write("This comparison shows how close the client's self-reported income is to the IRS Wage & Income transcript or Account Transcript AGI for the most recent year.")
+    
+    with json_tab:
+        st.subheader("🔧 Comparison Data (JSON)")
+        
+        # Prepare comparison data for JSON display
+        comparison_data = {
+            "comparison_info": {
+                "most_recent_year": most_recent_year,
+                "client_annual_income": client_annual_income,
+                "wi_total_income": wi_total_income,
+                "at_agi": at_agi,
+                "transcript_income_used": transcript_income,
+                "transcript_source": transcript_label,
+                "percentage_difference": percent_diff
+            },
+            "client_data": client_data,
+            "wi_summary": wi_summary,
+            "at_data": at_data
+        }
+        
+        st.json(comparison_data)
+
+def render_login_interface():
+    """Render the login interface for TPS authentication"""
+    st.title("🔐 TPS Authentication")
     st.markdown("---")
-    st.write("This comparison shows how close the client's self-reported income is to the IRS Wage & Income transcript or Account Transcript AGI for the most recent year.")
+    
+    # Check if already authenticated and not expired
+    cookies, user_agent, message = load_cookies_from_file()
+    expired = False
+    if message and ("hour" in message and ("old" in message or "expired" in message)):
+        expired = True
+    
+    if cookies and user_agent and not expired:
+        st.success("✅ Already authenticated with TPS!")
+        st.info(f"Last login: {message}")
+        # Show cookie info
+        with st.expander("🔧 Cookie Information"):
+            try:
+                if os.path.exists("logiqs-cookies.json"):
+                    with open("logiqs-cookies.json", 'r') as f:
+                        cookie_data = json.load(f)
+                    timestamp = datetime.fromisoformat(cookie_data['timestamp'])
+                    age_hours = (datetime.now() - timestamp).total_seconds() / 3600
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Cookie Age", f"{age_hours:.1f} hours")
+                    with col2:
+                        st.metric("Cookie Count", len(cookie_data.get('cookies', [])))
+                    with col3:
+                        st.metric("Status", "Valid" if age_hours < 12 else "Expired")
+                    st.write("**Cookie Names:**")
+                    cookie_names = [c['name'] for c in cookie_data.get('cookies', [])]
+                    st.write(", ".join(cookie_names))
+                elif os.path.exists("tps_cookies.json"):
+                    with open("tps_cookies.json", 'r') as f:
+                        cookie_data = json.load(f)
+                    timestamp = datetime.fromisoformat(cookie_data['timestamp'])
+                    age_hours = (datetime.now() - timestamp).total_seconds() / 3600
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Cookie Age", f"{age_hours:.1f} hours")
+                    with col2:
+                        st.metric("Cookie Count", cookie_data.get('cookie_count', 'N/A'))
+                    with col3:
+                        st.metric("Status", "Valid" if age_hours < 12 else "Expired")
+                    st.write("**Cookie Names:**")
+                    st.write(", ".join(cookie_data.get('cookie_names', [])))
+            except Exception as e:
+                st.error(f"Error reading cookie info: {e}")
+        if st.button("🔄 Refresh Authentication"):
+            st.info("Refreshing authentication...")
+            success = refresh_tps_authentication()
+            if success:
+                st.success("✅ Authentication refreshed successfully!")
+                st.rerun()
+            else:
+                st.error("❌ Failed to refresh authentication")
+        return True
+    # If cookies are missing or expired, show the login form
+    st.subheader("Enter your TPS credentials")
+    log_lines = []
+    def st_log_callback(msg):
+        log_lines.append(msg)
+        st.session_state['tps_login_log'] = '\n'.join(log_lines)
+    with st.form("tps_login_form"):
+        username = st.text_input("Username/Email", key="tps_username")
+        password = st.text_input("Password", type="password", key="tps_password")
+        col1, col2 = st.columns(2)
+        with col1:
+            submit_button = st.form_submit_button("🔐 Login to TPS")
+        with col2:
+            test_button = st.form_submit_button("🧪 Test Connection")
+        if submit_button:
+            if not username or not password:
+                st.error("❌ Please enter both username and password")
+                return False
+            with st.spinner("🔐 Authenticating with TPS..."):
+                log_lines.clear()
+                placeholder = st.empty()
+                def stream_log(msg):
+                    log_lines.append(msg)
+                    placeholder.code('\n'.join(log_lines), language='text')
+                success, logs = authenticate_and_sync_cookies(username, password, headless=True, slow_mo=1000, st_log_callback=stream_log)
+                placeholder.code('\n'.join(log_lines), language='text')
+                if success:
+                    st.success("✅ Authentication successful!")
+                    st.info("You can now use all TPS features in the app.")
+                    st.rerun()
+                else:
+                    st.error("❌ Authentication failed. Please check your credentials.")
+                    return False
+        elif test_button:
+            st.info("🧪 Testing TPS connection...")
+            test_result = test_tps_connection()
+            if test_result:
+                st.success("✅ TPS site is accessible")
+            else:
+                st.error("❌ Cannot connect to TPS site")
+    # Show log output if present
+    if 'tps_login_log' in st.session_state and st.session_state['tps_login_log']:
+        with st.expander("Authentication Log"):
+            st.code(st.session_state['tps_login_log'], language='text')
+    return False
+
+def authenticate_and_sync_cookies(username, password, headless=True, slow_mo=1000, st_log_callback=None):
+    import os
+    import json
+    from datetime import datetime
+    from playwright.sync_api import sync_playwright
+    LOGIQS_URL = 'https://tps.logiqs.com'
+    COOKIES_FILE = 'logiqs-cookies.json'
+    logs = []
+    def log(msg):
+        print(msg)
+        logs.append(msg)
+        if st_log_callback:
+            st_log_callback(msg)
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=headless, slow_mo=slow_mo)
+        try:
+            context = browser.new_context()
+            page = context.new_page()
+            log('🌐 Navigating to Logiqs login page...')
+            page.goto(LOGIQS_URL)
+            # Wait for page to load completely
+            page.wait_for_load_state('networkidle', timeout=15000)
+            log('📝 Looking for login form elements...')
+            # Try different possible selectors for username/email field
+            username_selectors = [
+                'input[name="username"]',
+                'input[name="email"]', 
+                '#username',
+                '#email',
+                'input[type="email"]',
+                'input[placeholder*="username" i]',
+                'input[placeholder*="email" i]',
+                '#txtUsername2'  # Keep the original selector as fallback
+            ]
+            username_field = None
+            for selector in username_selectors:
+                try:
+                    username_field = page.locator(selector).first
+                    if username_field.is_visible(timeout=2000):
+                        log(f'✅ Found username field with selector: {selector}')
+                        break
+                except:
+                    continue
+            if not username_field:
+                log('❌ Could not find username/email input field')
+                log('🔍 Available input fields on page:')
+                try:
+                    inputs = page.locator('input').all()
+                    for i, inp in enumerate(inputs[:10]):  # Show first 10 inputs
+                        try:
+                            input_type = inp.get_attribute('type') or 'text'
+                            input_name = inp.get_attribute('name') or 'no-name'
+                            input_id = inp.get_attribute('id') or 'no-id'
+                            log(f'   Input {i+1}: type="{input_type}", name="{input_name}", id="{input_id}"')
+                        except:
+                            log(f'   Input {i+1}: <error reading attributes>')
+                except:
+                    log('   Could not inspect input fields')
+                return False, logs
+            username_field.fill(username)
+            # Find and fill password field
+            password_selectors = [
+                'input[name="password"]',
+                '#password',
+                'input[type="password"]',
+                'input[placeholder*="password" i]',
+                '#txtPassword2'  # Keep the original selector as fallback
+            ]
+            password_field = None
+            for selector in password_selectors:
+                try:
+                    password_field = page.locator(selector).first
+                    if password_field.is_visible(timeout=2000):
+                        log(f'✅ Found password field with selector: {selector}')
+                        break
+                except:
+                    continue
+            if not password_field:
+                log('❌ Could not find password input field')
+                return False, logs
+            password_field.fill(password)
+            # Find and click login button
+            login_selectors = [
+                'button[type="submit"]',
+                'input[type="submit"]',
+                'button:has-text("Login")',
+                'button:has-text("Sign In")',
+                'button:has-text("Log In")',
+                '.login-button',
+                '#login-button',
+                '[data-testid="login-button"]',
+                '#btnLogin2'  # Keep the original selector as fallback
+            ]
+            login_button = None
+            for selector in login_selectors:
+                try:
+                    login_button = page.locator(selector).first
+                    if login_button.is_visible(timeout=2000):
+                        log(f'✅ Found login button with selector: {selector}')
+                        break
+                except:
+                    continue
+            if not login_button:
+                log('❌ Could not find login button')
+                log('🔍 Available buttons on page:')
+                try:
+                    buttons = page.locator('button').all()
+                    for i, btn in enumerate(buttons[:10]):  # Show first 10 buttons
+                        try:
+                            button_text = btn.text_content() or 'no-text'
+                            button_type = btn.get_attribute('type') or 'button'
+                            log(f'   Button {i+1}: text="{button_text}", type="{button_type}"')
+                        except:
+                            log(f'   Button {i+1}: <error reading attributes>')
+                except:
+                    log('   Could not inspect buttons')
+                return False, logs
+            log('🔑 Clicking login button...')
+            login_button.click()
+            # Wait for successful login (look for dashboard, user menu, or redirect)
+            log('⏳ Waiting for successful authentication...')
+            try:
+                # Wait for either successful login indicators or error messages
+                # Use a timeout and check for success/error conditions
+                page.wait_for_timeout(5000)  # Wait a bit for the page to respond
+                # Check if we're still on login page (error case)
+                current_url = page.url
+                if 'login' in current_url or 'signin' in current_url:
+                    # Check for error messages
+                    error_selectors = ['.error', '.alert-error', '.login-error', '[data-testid="error"]']
+                    error_found = False
+                    for selector in error_selectors:
+                        try:
+                            error_element = page.locator(selector).first
+                            if error_element.is_visible(timeout=1000):
+                                error_text = error_element.text_content()
+                                log(f'❌ Login failed: {error_text}')
+                                error_found = True
+                                break
+                        except:
+                            continue
+                    if not error_found:
+                        log('❌ Login failed: Still on login page after submission')
+                    return False, logs
+                # Check for success indicators
+                success_selectors = ['.dashboard', '.user-menu', '.profile', '[data-testid="dashboard"]', '.welcome', '.user-name', '.account-menu']
+                success_found = False
+                for selector in success_selectors:
+                    try:
+                        success_element = page.locator(selector).first
+                        if success_element.is_visible(timeout=1000):
+                            log('✅ Successfully authenticated!')
+                            success_found = True
+                            break
+                    except:
+                        continue
+                if not success_found:
+                    log('⚠️  Could not detect success indicators, but proceeding...')
+            except Exception as error:
+                log(f'❌ Error during authentication: {str(error)}')
+                return False, logs
+            # Wait a bit more to ensure all cookies are set
+            page.wait_for_timeout(3000)
+            log('🍪 Extracting cookies...')
+            cookies = context.cookies()
+            cookies_data = {
+                'timestamp': datetime.now().isoformat(),
+                'url': LOGIQS_URL,
+                'cookies': cookies
+            }
+            with open(COOKIES_FILE, 'w') as f:
+                json.dump(cookies_data, f, indent=2)
+            log(f'💾 Cookies saved to {COOKIES_FILE}')
+            log(f'📊 Found {len(cookies)} cookies:')
+            for cookie in cookies:
+                value_preview = cookie["value"][:20] + '...' if len(cookie["value"]) > 20 else cookie["value"]
+                log(f'   - {cookie["name"]}: {value_preview}')
+            log('🧪 Testing access to protected content...')
+            try:
+                page.goto(f'{LOGIQS_URL}/dashboard', wait_until='networkidle')
+                log('✅ Successfully accessed protected content')
+            except Exception as error:
+                log('⚠️  Could not access dashboard, but cookies are saved')
+            log('\n🎉 Authentication and cookie sync completed successfully!')
+            log(f'📁 Cookies file: {os.path.abspath(COOKIES_FILE)}')
+            log('💡 You can now use these cookies in your API requests')
+            return True, logs
+        except Exception as error:
+            log(f'❌ Error during authentication: {str(error)}')
+            return False, logs
+        finally:
+            browser.close()
+
+def test_tps_connection() -> bool:
+    """Test if TPS site is accessible"""
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto("https://tps.logiqs.com/Login.aspx", timeout=10000)
+            title = page.title()
+            browser.close()
+            return "Login" in title or "TPS" in title
+    except:
+        return False
+
+def refresh_tps_authentication() -> bool:
+    """Refresh TPS authentication using the Streamlit login interface"""
+    st.info("Please use the '🔐 TPS Login' tab to refresh your authentication.")
+    return False
 
 def main():
     st.set_page_config(
@@ -2879,13 +3230,15 @@ def main():
     # Radio button for page selection
     page = st.sidebar.radio(
         "Choose a page:",
-        ["🏠 Home", "📄 WI Parser", "📊 AT Parser", "📋 ROA Parser", "📝 TRT Parser", "📊 Comprehensive Analysis", "📋 Client Profile", "⚙️ Settings", "📊 Comparison"],
+        ["🏠 Home", "🔐 TPS Login", "📄 WI Parser", "📊 AT Parser", "📋 ROA Parser", "📝 TRT Parser", "📊 Comprehensive Analysis", "📋 Client Profile", "⚙️ Settings", "📊 Comparison"],
         index=0
     )
 
     # Render content based on selected page
     if page == "🏠 Home":
         render_home()
+    elif page == "🔐 TPS Login":
+        render_login_interface()
     elif page == "📄 WI Parser":
         render_wi_parser()
     elif page == "📊 AT Parser":
