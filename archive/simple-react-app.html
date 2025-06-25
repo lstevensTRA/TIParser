@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TI Parser - React App</title>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .app {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .header {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        .card {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        .status {
+            padding: 10px;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+        .success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .loading { background-color: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
+        .button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        .button:hover { background-color: #0056b3; }
+        .button:disabled { background-color: #6c757d; cursor: not-allowed; }
+        .file-input {
+            margin: 10px 0;
+        }
+        .nav {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        .nav-item {
+            padding: 10px 20px;
+            background: #e9ecef;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .nav-item.active {
+            background: #007bff;
+            color: white;
+        }
+        .tab-content {
+            display: none;
+        }
+        .tab-content.active {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+        const API_BASE = 'http://localhost:3001/api';
+
+        function App() {
+            const [activeTab, setActiveTab] = useState('home');
+            const [backendStatus, setBackendStatus] = useState('loading');
+            const [healthData, setHealthData] = useState(null);
+
+            useEffect(() => {
+                checkBackendHealth();
+            }, []);
+
+            const checkBackendHealth = async () => {
+                try {
+                    const response = await axios.get(`${API_BASE}/health`);
+                    setHealthData(response.data);
+                    setBackendStatus('connected');
+                } catch (error) {
+                    setBackendStatus('error');
+                    console.error('Backend health check failed:', error);
+                }
+            };
+
+            return (
+                <div className="app">
+                    <div className="header">
+                        <h1>TI Parser - React App</h1>
+                        <div className="status">
+                            {backendStatus === 'loading' && <span className="loading">🔄 Checking backend...</span>}
+                            {backendStatus === 'connected' && <span className="success">✅ Backend connected</span>}
+                            {backendStatus === 'error' && <span className="error">❌ Backend not accessible</span>}
+                        </div>
+                    </div>
+
+                    <div className="nav">
+                        <div 
+                            className={`nav-item ${activeTab === 'home' ? 'active' : ''}`}
+                            onClick={() => setActiveTab('home')}
+                        >
+                            Home
+                        </div>
+                        <div 
+                            className={`nav-item ${activeTab === 'parsers' ? 'active' : ''}`}
+                            onClick={() => setActiveTab('parsers')}
+                        >
+                            Parsers
+                        </div>
+                        <div 
+                            className={`nav-item ${activeTab === 'auth' ? 'active' : ''}`}
+                            onClick={() => setActiveTab('auth')}
+                        >
+                            Authentication
+                        </div>
+                        <div 
+                            className={`nav-item ${activeTab === 'analysis' ? 'active' : ''}`}
+                            onClick={() => setActiveTab('analysis')}
+                        >
+                            Analysis
+                        </div>
+                    </div>
+
+                    <div className={`tab-content ${activeTab === 'home' ? 'active' : ''}`}>
+                        <HomeTab healthData={healthData} />
+                    </div>
+
+                    <div className={`tab-content ${activeTab === 'parsers' ? 'active' : ''}`}>
+                        <ParsersTab />
+                    </div>
+
+                    <div className={`tab-content ${activeTab === 'auth' ? 'active' : ''}`}>
+                        <AuthTab />
+                    </div>
+
+                    <div className={`tab-content ${activeTab === 'analysis' ? 'active' : ''}`}>
+                        <AnalysisTab />
+                    </div>
+                </div>
+            );
+        }
+
+        function HomeTab({ healthData }) {
+            return (
+                <div className="card">
+                    <h2>Welcome to TI Parser</h2>
+                    <p>This is a React application for parsing IRS documents.</p>
+                    
+                    {healthData && (
+                        <div className="status success">
+                            <h3>Backend Status</h3>
+                            <p><strong>Status:</strong> {healthData.status}</p>
+                            <p><strong>Version:</strong> {healthData.version}</p>
+                            <p><strong>Timestamp:</strong> {healthData.timestamp}</p>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        function ParsersTab() {
+            const [selectedFile, setSelectedFile] = useState(null);
+            const [parserType, setParserType] = useState('wi');
+            const [result, setResult] = useState(null);
+            const [loading, setLoading] = useState(false);
+
+            const handleFileChange = (e) => {
+                setSelectedFile(e.target.files[0]);
+            };
+
+            const parseDocument = async () => {
+                if (!selectedFile) return;
+
+                setLoading(true);
+                setResult(null);
+
+                try {
+                    const formData = new FormData();
+                    formData.append('file', selectedFile);
+
+                    const response = await axios.post(`${API_BASE}/parse/${parserType}`, formData, {
+                        headers: {
+                            'Content-Type': 'multipart/form-data',
+                        },
+                    });
+
+                    setResult(response.data);
+                } catch (error) {
+                    setResult({ error: error.response?.data?.error || error.message });
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            return (
+                <div className="card">
+                    <h2>Document Parsers</h2>
+                    
+                    <div>
+                        <label>Parser Type:</label>
+                        <select value={parserType} onChange={(e) => setParserType(e.target.value)}>
+                            <option value="wi">WI Parser</option>
+                            <option value="at">AT Parser</option>
+                            <option value="roa">ROA Parser</option>
+                            <option value="trt">TRT Parser</option>
+                        </select>
+                    </div>
+
+                    <div>
+                        <input 
+                            type="file" 
+                            accept=".pdf" 
+                            onChange={handleFileChange}
+                            className="file-input"
+                        />
+                    </div>
+
+                    <button 
+                        className="button" 
+                        onClick={parseDocument}
+                        disabled={!selectedFile || loading}
+                    >
+                        {loading ? 'Parsing...' : 'Parse Document'}
+                    </button>
+
+                    {result && (
+                        <div className="status">
+                            {result.error ? (
+                                <div className="error">
+                                    <h3>Error</h3>
+                                    <p>{result.error}</p>
+                                </div>
+                            ) : (
+                                <div className="success">
+                                    <h3>Parsing Result</h3>
+                                    <pre>{JSON.stringify(result, null, 2)}</pre>
+                                </div>
+                            )}
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        function AuthTab() {
+            const [authStatus, setAuthStatus] = useState(null);
+            const [loading, setLoading] = useState(false);
+
+            const checkAuthStatus = async () => {
+                setLoading(true);
+                try {
+                    const response = await axios.get(`${API_BASE}/auth/status`);
+                    setAuthStatus(response.data);
+                } catch (error) {
+                    setAuthStatus({ error: error.response?.data?.error || error.message });
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            return (
+                <div className="card">
+                    <h2>Authentication</h2>
+                    
+                    <button 
+                        className="button" 
+                        onClick={checkAuthStatus}
+                        disabled={loading}
+                    >
+                        {loading ? 'Checking...' : 'Check Auth Status'}
+                    </button>
+
+                    {authStatus && (
+                        <div className="status">
+                            {authStatus.error ? (
+                                <div className="error">
+                                    <h3>Error</h3>
+                                    <p>{authStatus.error}</p>
+                                </div>
+                            ) : (
+                                <div className="success">
+                                    <h3>Authentication Status</h3>
+                                    <pre>{JSON.stringify(authStatus, null, 2)}</pre>
+                                </div>
+                            )}
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        function AnalysisTab() {
+            return (
+                <div className="card">
+                    <h2>Analysis</h2>
+                    <p>Analysis features will be implemented here.</p>
+                </div>
+            );
+        }
+
+        ReactDOM.render(<App />, document.getElementById('root'));
+    </script>
+</body>
+</html> 
